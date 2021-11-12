@@ -797,6 +797,7 @@ def main_function(n_kernels=16, output_channels = 2, batch_size=10, epochs = 5, 
             plt.plot(valid_acc,'r' , label='Validation acc')
             plt.ylim(0, 1.1)
             plt.title("Trustworthy Medical Segmentation with Uncertainty Estimation")
+            # plt.title("Density Propagation for Segmentation with UNET") # old titles
             plt.xlabel("Epochs")
             plt.ylabel("Accuracy")
             plt.legend(loc='lower right')
@@ -808,6 +809,7 @@ def main_function(n_kernels=16, output_channels = 2, batch_size=10, epochs = 5, 
             plt.plot(valid_error,'r' , label='Validation error')
             #plt.ylim(0, 1.1)
             plt.title("Trustworthy Medical Segmentation with Uncertainty Estimation")
+            # plt.title("Density Propagation for Segmentation with UNET") # old titles
             plt.xlabel("Epochs")
             plt.ylabel("Error")
             plt.legend(loc='upper right')
@@ -821,6 +823,7 @@ def main_function(n_kernels=16, output_channels = 2, batch_size=10, epochs = 5, 
             
             #plt.ylim(0, 1.1)
             plt.title("Trustworthy Medical Segmentation with Uncertainty Estimation")
+            # plt.title("Density Propagation for Segmentation with UNET") # old titles
             plt.xlabel("Epochs")
             plt.ylabel("dice coefficient")
             plt.legend(loc='lower right')
