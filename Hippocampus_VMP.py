@@ -855,6 +855,7 @@ def main_function(n_kernels=32, output_channels = 3, batch_size=10, epochs = 100
             plt.plot(valid_acc,'r' , label='Validation acc')
             plt.ylim(0, 1.1)
             plt.title("Trustworthy Medical Segmentation with Uncertainty Estimation")
+            # plt.title("Density Propagation for Segmentation with UNET") # old titles
             plt.xlabel("Epochs")
             plt.ylabel("Accuracy")
             plt.legend(loc='lower right')
@@ -866,6 +867,7 @@ def main_function(n_kernels=32, output_channels = 3, batch_size=10, epochs = 100
             plt.plot(valid_error,'r' , label='Validation error')
             #plt.ylim(0, 1.1)
             plt.title("Trustworthy Medical Segmentation with Uncertainty Estimation")
+            # plt.title("Density Propagation for Segmentation with UNET") # old titles
             plt.xlabel("Epochs")
             plt.ylabel("Error")
             plt.legend(loc='upper right')
@@ -878,6 +880,7 @@ def main_function(n_kernels=32, output_channels = 3, batch_size=10, epochs = 100
             plt.plot(train_dice2, 'royalblue', label='Training Dice C')
             plt.plot(val_dice2,'firebrick' , label='Validation Dice C')
             plt.title("Trustworthy Medical Segmentation with Uncertainty Estimation")
+            # plt.title("Density Propagation for Segmentation with UNET") # old titles
             plt.xlabel("Epochs")
             plt.ylabel("dice coefficient")
             plt.legend(loc='lower right')
