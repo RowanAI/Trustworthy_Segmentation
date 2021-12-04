@@ -1,7 +1,8 @@
-# Trustworthy Medical Segmentation with Uncertainty Estimation
+### Copyright (C) <2021>  <Giuseppina Carannante, Dimah Dera, Ghulam Rasool, Nidhal Bouaynaya, and Hassan M. Fathallah-Shaykh>
+### Paper :Trustworthy Medical Segmentation with Uncertainty Estimation
+
 # VMP Implementation for BRATS DATA 
-# U-NET structure with 5 encoding and 4 decoding blocks
-# Giuseppina Carannante 
+# U-NET structure with 5 encoding and 4 decoding blocks 
 
 import tensorflow as tf
 from tensorflow import keras
@@ -17,8 +18,584 @@ import timeit
 import pandas as pd
 plt.ioff()
 from mpl_toolkits import axes_grid1
+
+#################################################################################
+# The class that propagates the mean and covariance matrix of the variational distribution 
+# through the First Convolution Layer     
+class myConv_input(tf.keras.layers.Layer):
+    """y = Conv(x, w )"""
+    """ x is constant and w is a r.v.
+        :param kernel_num: Number of output channels       (Default   128)
+        :param kernel_size:  Size of the conv, kernel        (Default   3)
+        :param kernel_stride:  Stride used for the conv.        (Default   1)
+        :param padding:  type of padding used for the conv.        (Default   "VALID")
+        :param(s) mean_mu, mean_sigma:  Mean and Std used for parameters' mean initialization        (Default   0, 0.1)
+        :param(s) sigma_min, sigma_max:  Min and Max used for parameters' sigma initialization       (Default   -12, -4.6)
+        
+    """
+    def __init__(self, kernel_num = 128,kernel_size=3, kernel_stride=1, padding="VALID",
+                    mean_mu=0,mean_sigma=0.1, sigma_min=-12, sigma_max=-4.6):
+        super(myConv_input, self).__init__()
+        self.kernel_size = kernel_size #param kernel_size:  Size of the conv, kernel (Default   3)
+        self.kernel_num = kernel_num #param out_channels: Number of Kernels (Required)
+        self.kernel_stride = kernel_stride #param stride: Stride Length (Default   1)
+        self.padding = padding 
+        self.mean_mu =mean_mu
+        self.mean_sigma=mean_sigma
+        self.sigma_min =sigma_min
+        self.sigma_max = sigma_max
+
+    def build(self, input_shape):
+        tau = 1.
+        MYinitializer = tf.keras.initializers.TruncatedNormal(mean=self.mean_mu, stddev=self.mean_sigma) 
+        dim = self.kernel_size * self.kernel_size
+        self.w_mu = self.add_weight(name='w_mu1',
+            shape=(self.kernel_size,self.kernel_size, input_shape[-1], self.kernel_num),
+            initializer=MYinitializer, regularizer=tf.keras.regularizers.l2(tau),
+            trainable=True
+        )  
+        self.w_sigma = self.add_weight(name = 'w_sigma1',
+            shape=(self.kernel_num,),
+            initializer=tf.random_uniform_initializer(minval= self.sigma_min, maxval=self.sigma_max,  seed=None), regularizer=sigma_regularizer(dim),
+            trainable=True
+        )   
+                  
+    def call(self, inputs):
+        mu_out = tf.nn.conv2d(inputs, self.w_mu, strides=self.kernel_stride, padding=self.padding )
+        w_sigma = tf.math.softplus(self.w_sigma)
+        vect_sigma=tf.broadcast_to(w_sigma,[self.kernel_size*self.kernel_size*self.w_mu.shape[2], self.kernel_num], name=None)
+        x_patches = tf.image.extract_patches(inputs, sizes=[1, self.kernel_size, self.kernel_size, 1], strides=[1,self.kernel_stride,self.kernel_stride,1], rates=[1,1,1,1], padding = self.padding)
+        x_matrix = tf.reshape(x_patches,[inputs.shape[0], -1, self.kernel_size*self.kernel_size*self.w_mu.shape[2]]) #NON SICURA DELLA SHAPE w_mu[2]
+        sigma=tf.matmul(tf.math.square(x_matrix),vect_sigma)
+        sigma_out=tf.reshape(sigma, mu_out.shape)
+        return mu_out, sigma_out
+###################################################
+# The class that propagates the mean and covariance matrix of the variational distribution 
+# through the Intermediate Convolution Layers    (i.e., both input feature map and kernels are random tensors) 
+class myConv_intermediate(tf.keras.layers.Layer):
+    """y = Conv(x, w )"""
+    """ x and w are both r.v.
+        :param kernel_num: Number of output channels       (Default   64)
+        :param kernel_size:  Size of the conv, kernel        (Default   3)
+        :param kernel_stride:  Stride used for the conv.        (Default   1)
+        :param padding:  type of padding used for the conv.        (Default   "VALID")
+        :param(s) mean_mu, mean_sigma:  Mean and Std used for parameters' mean initialization        (Default   0, 0.1)
+        :param(s) sigma_min, sigma_max:  Min and Max used for parameters' sigma initialization       (Default   -12, -4.6)
+        (Note:for 1x1 Convolution: change kernel_size = 1 and kernel_num = num_classes)   
+    """
+
+    def __init__(self, kernel_num = 64 ,kernel_size=3, kernel_stride=1, padding="VALID",
+                    mean_mu=0,mean_sigma=0.1, sigma_min=-12, sigma_max=-4.6):
+        super(myConv_intermediate, self).__init__()
+        self.kernel_size = kernel_size #param kernel_size:  Size of the conv, kernel (Default   3)
+        self.kernel_num = kernel_num #param out_channels: Number of Kernels (Required)
+        self.kernel_stride = kernel_stride #param stride: Stride Length (Default   1)
+        self.padding = padding 
+        self.mean_mu =mean_mu
+        self.mean_sigma=mean_sigma
+        self.sigma_min =sigma_min
+        self.sigma_max = sigma_max
+
+    def build(self, input_shape):
+        #print(input_shape)
+        tau = 1.
+        MYinitializer =tf.keras.initializers.TruncatedNormal(mean=self.mean_mu, stddev=self.mean_sigma)
+        dim = self.kernel_size * self.kernel_size
+        self.w_mu = self.add_weight(name='w_mu',
+            shape=(self.kernel_size,self.kernel_size, input_shape[-1], self.kernel_num),
+            initializer=MYinitializer, regularizer=tf.keras.regularizers.l2(tau),
+            trainable=True
+        )  
+        self.w_sigma = self.add_weight(name = 'w_sigma',
+            shape=(self.kernel_num,),
+            initializer=tf.random_uniform_initializer(minval= self.sigma_min, maxval=self.sigma_max, seed=None), regularizer=sigma_regularizer(dim), 
+            trainable=True
+        )   
+                  
+    def call(self, inputs, sigma_input):
+        mu_out = tf.nn.conv2d(inputs, self.w_mu, strides=self.kernel_stride, padding=self.padding )
+        w_sigma = tf.math.softplus(self.w_sigma)
+        vect_sigma=tf.broadcast_to(w_sigma,[self.kernel_size*self.kernel_size*inputs.shape[-1], self.kernel_num], name=None)
+        x_patches = tf.image.extract_patches(inputs, sizes=[1, self.kernel_size, self.kernel_size, 1], strides=[1,self.kernel_stride,self.kernel_stride,1], rates=[1,1,1,1], padding = self.padding)
+        sigma_patches =tf.image.extract_patches(sigma_input, sizes=[1, self.kernel_size, self.kernel_size, 1], strides=[1,self.kernel_stride,self.kernel_stride,1], rates=[1,1,1,1], padding = self.padding)
+        x_matrix = tf.reshape(x_patches,[inputs.shape[0], mu_out.shape[1]*mu_out.shape[1], self.kernel_size*self.kernel_size*inputs.shape[-1]]) 
+        sigma_matrix = tf.reshape(sigma_patches,[inputs.shape[0], mu_out.shape[1]*mu_out.shape[1], self.kernel_size*self.kernel_size*inputs.shape[-1]])
+        sigma1=tf.matmul(tf.math.square(x_matrix),vect_sigma)
+        w_mean=tf.reshape(self.w_mu,[-1,inputs.shape[-1],self.kernel_num])
+        w_mean=tf.reshape(w_mean,[-1,self.kernel_num])
+        sigma2=tf.matmul(sigma_matrix, tf.math.square(w_mean))
+        sigma3=tf.matmul(sigma_matrix,vect_sigma)
+        sigma=sigma1+sigma2+sigma3 # shape=[batch,new_image_size*new_image_size,num_kernels]
+        sigma_out=tf.reshape(sigma, mu_out.shape) # shape=[batch,new_image_size,new_image_size,num_kernels]
+        
+        return mu_out, sigma_out
+##########################################################
+# Class that propagates mean and covariance through the upsampling layer 
+class myupsampling(keras.layers.Layer):
+    """My_Upsampling"""
+
+    def __init__(self):
+        super(myupsampling, self).__init__()
+    def call(self, mu_in, sigma_in):
+        mu_out = unpool(mu_in)
+        sigma_out = unpool(sigma_in)
+        return mu_out, sigma_out
+
+
+def unpool(value, name='unpool'):
+    """ function called by the upsampling layer to expand the each slice of the incoming tensor.
+    :param value: A Tensor of shape [b, w,h, ch]
+    :return: An upsampled Tensor of shape [b, 2*w+1, 2*h+1, ch]
+    -> the output tensor will have alternating zeros and padded.
+    e.g.
+    input:      1 2 
+                3 4
+
+    output:  0 0 0 0 0
+             0 1 0 2 0
+             0 0 0 0 0
+             0 3 0 4 0
+             0 0 0 0 0
+    """
+    with tf.name_scope(name) as scope:
+        sh = value.get_shape().as_list()
+        dim = len(sh[1:-1])
+        out = (tf.reshape(value, [-1] + sh[-dim:]))
+        for i in range(dim, 0, -1):
+            out = tf.concat([out, tf.zeros_like(out)], i)
+        out_size = [-1] + [s * 2 for s in sh[1:-1]] + [sh[-1]]
+        out_before_pad = tf.reshape(out, out_size, name=scope)
+        paddings = tf.constant([[0, 0,], [1, 0], [1, 0], [0, 0,]])
+        out=tf.pad(out_before_pad, paddings, "CONSTANT")
+    return out
+###############################################################################################
+#Class that propagates mean and covariance through a padding layer (we pad mean and sigma in decoder)
+class mypadding(keras.layers.Layer):
+    """My_Padding"""
+
+    def __init__(self, pad_size = [2,2], sigma_fill = 0, mode= "CONSTANT"):
+        super(mypadding, self).__init__()
+        self.size = pad_size
+        self.sigma =sigma_fill
+        self.mode = mode
+    def call(self, mu_in, sigma_in):
+        paddings = tf.constant([[0, 0,], self.size, self.size, [0, 0,]])
+        mu_out = tf.pad(mu_in,paddings, self.mode )
+        sigma_out = tf.pad(sigma_in,paddings, self.mode,  constant_values=self.sigma ) #, constant_values=self.sigma
+        return mu_out, sigma_out
+###########################################################################################
+# Class that includes the Function to propagate mean and covariance through the pooling layer 
+class mymaxpooling(keras.layers.Layer):
+    """My_Max_Pooling"""
+
+    def __init__(self):
+        super(mymaxpooling, self).__init__()
+    def call(self, mu_in, sigma_in):
+        mu_out, argmax = tf.nn.max_pool_with_argmax(mu_in, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME', include_batch_in_index=True) #shape=[1, new_size,new_size,num_filters[0]]  
+        sigma_out= get_pooled(argmax,sigma_in)
+        return mu_out, sigma_out
+####################################################################
+#Class that Propagates mean and variance through the ReLU function 
+class myReLU(keras.layers.Layer):
+    """ReLU"""
+
+    def __init__(self):
+        super(myReLU, self).__init__()
+    def call(self, mu_in, Sigma_in):
+        mu_out = tf.nn.relu(mu_in)
+        gradi = grad_ReLU(mu_in) 
+        gradi_sq=tf.math.square(gradi)
+        Sigma_out = tf.math.multiply(gradi_sq,Sigma_in)
+        return mu_out, Sigma_out
+#########################################################################
+# This function computes the gradient of the ReLU function 
+def grad_ReLU(mu_in):
+  with tf.GradientTape() as g:
+    g.watch(mu_in)
+    out = tf.nn.relu(mu_in)
+  gradi = g.gradient(out, mu_in) 
+  return gradi
+############################################################################
+# This class contains the Function to Concatenate tensors from encoder and decoder paths  
+class myConc(keras.layers.Layer):
+    """Concatenation of downsampled (to be cropped) and upsampled feature maps
+    inputs: mu_Decoder, Sigma_Decoder,mu_Encoder, Sigma_Encoder"""
+
+    def __init__(self):
+        super(myConc, self).__init__()
+    def call(self, muD, SigmaD,muE, SigmaE):
+        """
+        Concatenation of Upsampled (from Decoder path) muD and SigmaD 
+        with muE and SigmaE (corresponding Encoder tensors) respectively
+        Args:
+            inputs  muE and SigmaE (4-D Tensor): (N, H1, W1, C1), 
+            inputs  muD and SigmaD (4-D Tensor): (N, H2, W2, C2)
+        Returns:
+            output (4-D Tensor): (N, H2, W2, C1 + C2)
+        """
+        mu_cropped = crop_tensor(muE,muD)
+        sigma_cropped = crop_tensor(SigmaE,SigmaD)
+        mu_out = tf.concat([muD, mu_cropped], axis=-1)
+        sigma_out = tf.concat([SigmaD, sigma_cropped], axis=-1)
+        return mu_out, sigma_out
+#############################################################################
+# The class that propagates the mean and covariance matrix of the variational distribution through the Softmax layer
+class mysoftmax(keras.layers.Layer):
+    """Mysoftmax pixel-wise"""
+
+    def __init__(self):
+        super(mysoftmax, self).__init__()
+    def call(self, mu_in, sigma_in):
+        mu_reshaped = tf.reshape(mu_in,[mu_in.shape[0], -1, mu_in.shape[3]])#shape=[Batch, size*size, num_labels]
+        sigma_reshaped = tf.reshape(sigma_in,[sigma_in.shape[0], -1, sigma_in.shape[3]])#shape=[Batch, size*size, num_labels]
+        mu_out = tf.nn.softmax(mu_reshaped)
+        pp1 = tf.expand_dims(mu_out, axis=3)
+        pp2 = tf.expand_dims(mu_out, axis=2)
+        ppT = tf.matmul(pp1, pp2)
+        p_diag = tf.linalg.diag(mu_out)
+        grad = p_diag - ppT
+        grad_sq = tf.math.square(grad)
+        sigma_exp= tf.expand_dims(sigma_reshaped,axis=3)
+        sigma = tf.matmul(grad_sq, sigma_exp)
+        sigma_out= tf.squeeze(sigma)
+        #mu_out and sigma_out shape = [bath, size*size, num_labels] 
+        return mu_out, sigma_out
+
+#######################################################################################
+# the log-likelihood of the objective function
+# Inputs: 
+#       y_pred_mean: The output Mean vector (predictive mean).
+#       y_pred_sd: The output Variance vector (from predictive covariance matrix).
+#       y_test: The ground truth prediction vector
+# Output:
+#       the expected log-likelihood term of the objective function  
+def nll_gaussian(y_test, y_pred_mean, y_pred_sd): 
+
+    eps=tf.constant(1e-3, shape=y_pred_sd.shape, name='epsilon')
+    y_pred_sd_inv =  tf.math.reciprocal(tf.math.add(y_pred_sd, eps)) #Computes the reciprocal element-wise
+    mu_square =  tf.math.square(y_pred_mean - y_test) 
+    mu_square = tf.expand_dims(mu_square, axis=2)
+    y_pred_sd_inv = tf.expand_dims(y_pred_sd_inv, axis=3) 
+    loss1 =  tf.matmul(mu_square ,  y_pred_sd_inv) 
+    loss = tf.reduce_mean(loss1, axis =0)
+    loss = tf.reduce_mean(loss)
+    #print('null gaussian loss1 ',loss)
+    
+    loss = tf.where(tf.math.is_nan(loss), tf.zeros_like(loss), loss)
+    loss = tf.where(tf.math.is_inf(loss), tf.zeros_like(loss), loss)
+    
+    loss2 = tf.math.reduce_prod(tf.math.add(y_pred_sd, eps), axis=-1) # shape [batch,size*size]
+    loss2 = tf.math.log(loss2)
+    loss2 = tf.reduce_mean(loss2) 
+    final_loss = 0.5*(loss+loss2)
+    return final_loss
+###############################################################
+# This function computes the sigma regulirizer for the KL-divergence for convolution layers.
+class sigma_regularizer(keras.regularizers.Regularizer):
+    def __init__(self, strength):
+        self.strength = strength
+
+    def __call__(self, x):
+        f_s = tf.math.softplus(x) 
+        return -self.strength * tf.reduce_mean(1. + tf.math.log(f_s) - f_s , axis=-1)
+################################################################
+
+# This class defines the network by calling all layers          
+class Density_prop_with_pad_UNET(tf.keras.Model):
+  """ Required: number_of_kernels and number_of_labels"""
+
+  def __init__(self, n_kernels, n_labels, name=None):
+    super(Density_prop_with_pad_UNET, self).__init__()
+
+    self.n_kernels = n_kernels
+    self.n_out = n_labels
+    self.conv_input = myConv_input(kernel_num = self.n_kernels)  
+    self.conv1 = myConv_intermediate(kernel_num = self.n_kernels) 
+
+    self.conv2 = myConv_intermediate(kernel_num = self.n_kernels*2)  
+    self.conv3 = myConv_intermediate(kernel_num = self.n_kernels*2)
+
+    self.conv4 = myConv_intermediate(kernel_num = self.n_kernels*4) 
+    self.conv5 = myConv_intermediate(kernel_num = self.n_kernels*4)
+
+
+    self.conv6 = myConv_intermediate(kernel_num = self.n_kernels*8)  
+    self.conv7 = myConv_intermediate(kernel_num = self.n_kernels*8)
+
+    self.conv8 = myConv_intermediate(kernel_num = self.n_kernels*16)  
+    self.conv9 = myConv_intermediate(kernel_num = self.n_kernels*16)
+
+    # now starting with decoder path
+
+    self.up1_conv2x2 = myConv_intermediate(kernel_num = self.n_kernels*8, kernel_size = 2, sigma_min=-4.6, sigma_max=-2.2)  
+    self.up1_conv1 = myConv_intermediate(kernel_num = self.n_kernels*8)
+    self.up1_conv2 = myConv_intermediate(kernel_num = self.n_kernels*8)
+    
+    self.up2_conv2x2 = myConv_intermediate(kernel_num = self.n_kernels*4, kernel_size = 2, sigma_min=-4.6, sigma_max=-2.2)  
+    self.up2_conv1 = myConv_intermediate(kernel_num = self.n_kernels*4)
+    self.up2_conv2 = myConv_intermediate(kernel_num = self.n_kernels*4)
+
+    self.up3_conv2x2 = myConv_intermediate(kernel_num = self.n_kernels*2, kernel_size = 2)  
+    self.up3_conv1 = myConv_intermediate(kernel_num = self.n_kernels*2)
+    self.up3_conv2 = myConv_intermediate(kernel_num = self.n_kernels*2)
+
+
+    self.up4_conv2x2 = myConv_intermediate(kernel_num = self.n_kernels, kernel_size = 2)  
+    self.up4_conv1 = myConv_intermediate(kernel_num = self.n_kernels)
+    self.up4_conv2 = myConv_intermediate(kernel_num = self.n_kernels)
+
+
+    self.conv_final = myConv_intermediate(kernel_num = self.n_out, kernel_size = 1, sigma_min=-4.6, sigma_max=-2.2) 
+    self.myrelu  = myReLU()
+    self.myconc = myConc()
+    self.mypad1 = mypadding(pad_size=[1,0], sigma_fill=0.1)
+    self.mypad_up6 = mypadding(pad_size=[3,3],sigma_fill=0.1) 
+    self.mypad = mypadding(sigma_fill=0.1)
+    self.myups =  myupsampling()
+    self.maxp =mymaxpooling()
+    self.mysoftmax = mysoftmax()
+
+  def call(self, inputs, training=True):
+    # first block encoder:
+    m1, s1 = self.conv_input(inputs) # 202
+    m1, s1 = self.myrelu(m1, s1) # 
+    m1, s1 =  self.conv1(m1, s1)  # 200
+    m1, s1 = self.myrelu(m1, s1)  
+    m1_p, s1_p = self.maxp(m1, s1) #  100
+    # second block encoder:
+    m2, s2 = self.conv2(m1_p, s1_p) # 98
+    m2, s2 = self.myrelu(m2, s2) 
+    m2, s2 =  self.conv3(m2, s2) # 96
+    m2, s2 = self.myrelu(m2, s2)  
+    m2_p, s2_p = self.maxp(m2, s2) # 48
+    # third block encoder: 
+    m3, s3 = self.conv4(m2_p, s2_p) # 46
+    m3, s3 = self.myrelu(m3, s3) 
+    m3, s3 =  self.conv5(m3, s3) # 44
+    m3, s3 = self.myrelu(m3, s3)  
+    m3_p, s3_p = self.maxp(m3, s3) # 22
+    # 4th block encoder: 
+    m4, s4 = self.conv6(m3_p, s3_p) # 20
+    m4, s4 = self.myrelu(m4, s4) 
+    m4, s4 =  self.conv7(m4, s4) # 18
+    m4, s4 = self.myrelu(m4, s4) 
+    m4_p, s4_p = self.maxp(m4, s4)  #9 
+    
+    # 5th block encoder:
+    m5, s5 = self.mypad1(m4_p, s4_p) # 10
+    m5, s5 = self.conv8(m5, s5) #8
+    m5, s5 = self.myrelu(m5, s5) 
+    m5, s5 =  self.conv9(m5, s5) # 6
+    m5, s5 = self.myrelu(m5, s5)
+    
+    # first block decoder:
+    d_m1, d_s1 = self.myups(m5, s5) 
+    d_m1, d_s1 = self.up1_conv2x2(d_m1, d_s1) #12
+    d_m1, d_s1 = self.mypad_up6(d_m1, d_s1) # 18
+    d_m1, d_s1 = self.myconc(d_m1, d_s1, m4, s4)
+    d_m1, d_s1 = self.up1_conv1(d_m1, d_s1 ) #16
+    d_m1, d_s1 = self.myrelu(d_m1, d_s1)
+    d_m1, d_s1 = self.mypad(d_m1, d_s1) #20
+    d_m1, d_s1 =  self.up1_conv2(d_m1, d_s1) #18
+    d_m1, d_s1 = self.myrelu(d_m1, d_s1)
+    # second block decoder:
+    d_m2, d_s2 = self.myups(d_m1, d_s1) 
+    d_m2, d_s2 = self.up2_conv2x2(d_m2, d_s2) #36
+    d_m2, d_s2 = self.mypad_up6(d_m2, d_s2) #42
+    d_m2, d_s2 = self.myconc(d_m2, d_s2, m3, s3)
+    d_m2, d_s2 = self.up2_conv1(d_m2, d_s2) #40
+    d_m2, d_s2 = self.myrelu(d_m2, d_s2)
+    d_m2, d_s2 = self.mypad(d_m2, d_s2) #44
+    d_m2, d_s2 =  self.up2_conv2(d_m2, d_s2) #42
+    d_m2, d_s2 = self.myrelu(d_m2, d_s2)
+    # third block decoder:
+    d_m3, d_s3 = self.myups(d_m2, d_s2) 
+    d_m3, d_s3 = self.up3_conv2x2(d_m3, d_s3) #84
+    d_m3, d_s3 = self.mypad_up6(d_m3, d_s3) #90
+    d_m3, d_s3 = self.myconc(d_m3, d_s3, m2,s2)
+    d_m3, d_s3 = self.up3_conv1(d_m3, d_s3) #88
+    d_m3, d_s3 = self.myrelu(d_m3, d_s3)
+    d_m3, d_s3 = self.mypad(d_m3, d_s3)  #92
+    d_m3, d_s3 =  self.up3_conv2(d_m3, d_s3) #90
+    d_m3, d_s3 = self.myrelu(d_m3, d_s3)  
+    # 4th block decoder:
+    d_m4, d_s4 = self.myups(d_m3, d_s3)
+    d_m4, d_s4 = self.up4_conv2x2(d_m4, d_s4)  #180
+    d_m4, d_s4 = self.mypad_up6(d_m4, d_s4) #186
+    d_m4, d_s4 = self.myconc(d_m4, d_s4, m1,s1)
+    d_m4, d_s4 = self.up4_conv1(d_m4, d_s4) #184
+    d_m4, d_s4 = self.myrelu(d_m4, d_s4)
+    d_m4, d_s4 = self.mypad(d_m4, d_s4) #188
+    d_m4, d_s4 =  self.up4_conv2(d_m4, d_s4) #186
+    d_m4, d_s4 = self.myrelu(d_m4, d_s4)
+   
+    m_final, s_final =  self.conv_final(d_m4, d_s4 )
+    outputs, Sigma= self.mysoftmax(m_final, s_final) # output images are flattened (& sigma vector)
+    #shape [batch, out_image_size*out_image_size, n_labels]
+    return outputs, Sigma
+
+########################################################################
+# OTHER FUNCTIONS:
 def softplus(x):
-    return np.log(1 + np.exp(x))   
+    """ softplus function"""
+    return np.log(1 + np.exp(x))
+
+def crop_numpy_image(x,shape, num_ch = 3):
+    """ function to crop input image to wanted shape when images are fed as numpy arrays:
+    _______________________________________________________
+    inputs: x = tensor to crop, shape = choosen dimension"""
+    or_size = x.shape[1]
+    start =(or_size - shape)/2 # starting point to slice image
+    start = int(start)
+    end_p = or_size - start
+    end_p = int(end_p)
+    
+    if num_ch==3:
+        im = x[:,start:end_p, start:end_p,:]
+    else:
+        im = x[:,start:end_p, start:end_p]
+    return im
+
+def crop_to_wanted_shape(x, shape):
+    """ function to crop input image to wanted shape (TENSORFLOW-version):
+    _______________________________________________________
+    inputs: x = tensor to crop, shape = choosen dimension"""
+    
+    x1_shape = tf.shape(x) # tensor
+    # offsets for the top left corner of the crop:
+    offsets = [0, (x1_shape[1] - shape) // 2, (x1_shape[2] - shape) // 2, 0]
+    size = [-1,shape, shape, -1]
+    x1_crop = tf.slice(x, offsets, size)
+    return x1_crop
+
+
+def crop_tensor(x1,x2):
+    """ Function to crop tensor x1 according to shape given by tensor x2
+    _______________________________________________________
+    inputs:  x1, x2"""
+    with tf.name_scope("crop"):
+        x1_shape = tf.shape(x1) # tensor coming from encoder path
+        x2_shape = tf.shape(x2) # corresponding tensor from decoder
+        # offsets for the top left corner of the crop:
+        offsets = [0, (x1_shape[1] - x2_shape[1]) // 2, (x1_shape[2] - x2_shape[2]) // 2, 0]
+        size = [-1, x2_shape[1], x2_shape[2], -1]
+        x1_crop = tf.slice(x1, offsets, size)
+        return x1_crop
+
+def log10(x):
+  """ function to compute log base 10 - (used for SNR)"""
+  numerator = tf.math.log(x)
+  denominator = tf.math.log(tf.constant(10, dtype=numerator.dtype))
+  return numerator / denominator
+############################################################################
+
+##########################################################################  
+def get_pooled(indices,other_tensor):
+    """Function to Pool a tensor using idices from another max pooling: 
+    inputs: 
+    indeces: from pooling the mean tensor
+    other_tensor: (sigma) tensor to pool
+    Returns: pooled sigma (other_tensor_pooled) 
+    """
+    b = other_tensor.shape[0]
+    w = other_tensor.shape[1]
+    h=other_tensor.shape[2]
+    c =other_tensor.shape[3]
+    other_tensor_pooled = tf.gather(tf.reshape(other_tensor,shape= [b*w*h*c,]),indices)
+    return other_tensor_pooled
+##############################################################################
+def expand_to_shape(data, shape, border='CONSTANT'):
+    """
+    Expands the array to the given image shape by padding it with a border (expects a tensor of shape [batches, nx, ny, channels].
+    :param data: the array to expand
+    :param shape: the target shape
+    :param border: default CONSTANT -> alternatives: "SYMMETRIC" , "REFLECT"(probably not useful)
+    """
+    diff_nx = shape[1] - data.shape[1]
+    diff_ny = shape[2] - data.shape[2]
+    #NEEDED IF LEFT & RIGHT (TOP & BOTTOM) ARE DIFFERENT
+    offset_nx_left = diff_nx // 2
+    offset_ny_left = diff_ny // 2
+    offset_nx_right = diff_nx - offset_nx_left
+    offset_ny_right = diff_ny - offset_ny_left
+    paddings = tf.constant([[0, 0,], [offset_nx_left, offset_nx_right], [offset_ny_left,offset_ny_right], [0, 0,]])
+    expanded = tf.pad(data,paddings, border )
+    return expanded
+##################################################################################
+# function to generate DSC values
+def dice(y_true, y_pred):
+    true_mask, pred_mask = y_true, y_pred
+    A=np.sum(true_mask, axis=(1,2))
+    B=np.sum(pred_mask, axis=(1,2))
+    im_sum = A+ B
+
+    # Compute Dice coefficient
+    intersection = np.multiply(true_mask, pred_mask)
+    intersection_sum = np.sum(intersection, axis=(1,2))
+    c=2. * intersection_sum / im_sum
+    c_masked = np.ma.masked_invalid(c)
+    c_masked_avr =np.mean(c_masked)
+    return c_masked_avr,c_masked
+#################################################################################
+# functions to generate masks for the binary tasks evaluation
+def mask_tumor(y_true, y_pred):
+    A,B = y_true, y_pred.numpy()
+    mask1a  = np.ma.masked_where(A > 0, A) # masking all tumor structures to 1
+    mask_1a=np.ma.filled(mask1a, fill_value=1)
+    mask1b  = np.ma.masked_where(B > 0, B) # masking all tumor structures to 1
+    mask_1b=np.ma.filled(mask1b, fill_value=1)
+    di,all_di=dice(mask_1a,mask_1b)
+    return di,all_di
+def mask_core(y_true, y_pred):
+    A,B = y_true, y_pred.numpy()
+    mask1a  = np.ma.masked_where(A ==2, A) # masking edema to 0
+    mask_1a=np.ma.filled(mask1a, fill_value=0)
+    mask2a  = np.ma.masked_where(mask_1a>0, mask_1a) # masking all remaining tumor structures to 1
+    mask_2a=np.ma.filled(mask2a, fill_value=1)
+
+    mask1b  = np.ma.masked_where(B ==2, B) # masking edema to 0
+    mask_1b=np.ma.filled(mask1b, fill_value=0)
+    mask2b  = np.ma.masked_where(mask_1b>0, mask_1b) # masking all remaining tumor structures to 1
+    mask_2b=np.ma.filled(mask2b, fill_value=1)
+    di,all_di=dice(mask_2a,mask_2b)
+    return di,all_di
+def mask_enh(y_true, y_pred):
+    A,B = y_true, y_pred.numpy()  
+    mask1a  = np.ma.masked_where(A != 4, A) # masking all non-enhancing to 0
+    mask_1a=np.ma.filled(mask1a, fill_value=0)
+    mask1a = np.ma.masked_where(A == 4, mask_1a) # mask enhancing tumor  to 1
+    mask_1a=np.ma.filled(mask1a, fill_value=1)  
+    mask1b  = np.ma.masked_where(B != 4, B)  # masking all non-enhancing to 0
+    mask_1b=np.ma.filled(mask1b, fill_value=0)
+    mask1b  = np.ma.masked_where(B == 4, mask_1b) # mask enhancing tumor to 1
+    mask_1b=np.ma.filled(mask1b, fill_value=1)
+    di,all_di=dice(mask_1a,mask_1b)
+    return di,all_di
+################################################################################################################
+# update_progress() : Displays or updates a console progress bar
+# Accepts a float between 0 and 1. Any int will be converted to a float.
+# A value under 0 represents a 'halt'.
+# A value at 1 or bigger represents 100%
+def update_progress(progress):
+    barLength = 10 # Modify this to change the length of the progress bar
+    status = ""
+    if isinstance(progress, int):
+        progress = float(progress)
+    if not isinstance(progress, float):
+        progress = 0
+        status = "error: progress var must be float\r\n"
+    if progress < 0:
+        progress = 0
+        status = "Halt...\r\n"
+    if progress >= 1:
+        progress = 1
+        status = "Done...\r\n"
+    block = int(round(barLength*progress))
+    text = "\rPercent: [{0}] {1}% {2}".format( "#"*block + "-"*(barLength-block), progress*100, status)
+    sys.stdout.write(text)
+    sys.stdout.flush()
+#################################################################################################################
+############################## Functions to generate images######################################################   
 def add_colorbar(im, aspect=20, pad_fraction=0.5, **kwargs):
     """Add a vertical color bar to an image plot."""
     divider = axes_grid1.make_axes_locatable(im.axes)
@@ -28,7 +605,7 @@ def add_colorbar(im, aspect=20, pad_fraction=0.5, **kwargs):
     cax = divider.append_axes("right", size=width, pad=pad)
     plt.sca(current_ax)
     return im.axes.figure.colorbar(im, cax=cax, **kwargs)
-
+######################### Function to save images and uncertainty information #############################################
 def save_adversarial_uncertainty(path,truex,adv, logits, truey,sigma,masked, images_n, Adversarial = True, targeted=True):
     path_full= path + './test_images/'
     if not os.path.exists(path_full):
@@ -177,570 +754,17 @@ def save_adversarial_uncertainty(path,truex,adv, logits, truey,sigma,masked, ima
     textfile.close()
     print('done saving uncertainty and creating images')
     return mean_u,  mean_background, mean_tumor, class1_unc, class2_unc, class3_unc, enh_unc
-###############################################################################
-# update_progress() : Displays or updates a console progress bar
-## Accepts a float between 0 and 1. Any int will be converted to a float.
-## A value under 0 represents a 'halt'.
-## A value at 1 or bigger represents 100%
+#################################################################################################################
 
-def update_progress(progress):
-    barLength = 10 # Modify this to change the length of the progress bar
-    status = ""
-    if isinstance(progress, int):
-        progress = float(progress)
-    if not isinstance(progress, float):
-        progress = 0
-        status = "error: progress var must be float\r\n"
-    if progress < 0:
-        progress = 0
-        status = "Halt...\r\n"
-    if progress >= 1:
-        progress = 1
-        status = "Done...\r\n"
-    block = int(round(barLength*progress))
-    text = "\rPercent: [{0}] {1}% {2}".format( "#"*block + "-"*(barLength-block), progress*100, status)
-    sys.stdout.write(text)
-    sys.stdout.flush()
-############################################
-# function to compute log base 10 - used for SNR
-def log10(x):
-  numerator = tf.math.log(x)
-  denominator = tf.math.log(tf.constant(10, dtype=numerator.dtype))
-  return numerator / denominator
-############################################
-# function to generate DSC values
-def dice(y_true, y_pred):
-    true_mask, pred_mask = y_true, y_pred
-    A=np.sum(true_mask, axis=(1,2))
-    B=np.sum(pred_mask, axis=(1,2))
-    im_sum = A+ B
-
-    # Compute Dice coefficient
-    intersection = np.multiply(true_mask, pred_mask)
-    intersection_sum = np.sum(intersection, axis=(1,2))
-    c=2. * intersection_sum / im_sum
-    c_masked = np.ma.masked_invalid(c)
-    c_masked_avr =np.mean(c_masked)
-    return c_masked_avr,c_masked
-############################################################################
-# functions to generate masks for the binary tasks evaluation
-def mask_tumor(y_true, y_pred):
-    A,B = y_true, y_pred.numpy()
-    mask1a  = np.ma.masked_where(A > 0, A) # masking all tumor structures to 1
-    mask_1a=np.ma.filled(mask1a, fill_value=1)
-    mask1b  = np.ma.masked_where(B > 0, B) # masking all tumor structures to 1
-    mask_1b=np.ma.filled(mask1b, fill_value=1)
-    di,all_di=dice(mask_1a,mask_1b)
-    return di,all_di
-def mask_core(y_true, y_pred):
-    A,B = y_true, y_pred.numpy()
-    mask1a  = np.ma.masked_where(A ==2, A) # masking edema to 0
-    mask_1a=np.ma.filled(mask1a, fill_value=0)
-    mask2a  = np.ma.masked_where(mask_1a>0, mask_1a) # masking all remaining tumor structures to 1
-    mask_2a=np.ma.filled(mask2a, fill_value=1)
-
-    mask1b  = np.ma.masked_where(B ==2, B) # masking edema to 0
-    mask_1b=np.ma.filled(mask1b, fill_value=0)
-    mask2b  = np.ma.masked_where(mask_1b>0, mask_1b) # masking all remaining tumor structures to 1
-    mask_2b=np.ma.filled(mask2b, fill_value=1)
-    di,all_di=dice(mask_2a,mask_2b)
-    return di,all_di
-def mask_enh(y_true, y_pred):
-    A,B = y_true, y_pred.numpy()  
-    mask1a  = np.ma.masked_where(A != 4, A) # masking all non-enhancing to 0
-    mask_1a=np.ma.filled(mask1a, fill_value=0)
-    mask1a = np.ma.masked_where(A == 4, mask_1a) # mask enhancing tumor  to 1
-    mask_1a=np.ma.filled(mask1a, fill_value=1)  
-    mask1b  = np.ma.masked_where(B != 4, B)  # masking all non-enhancing to 0
-    mask_1b=np.ma.filled(mask1b, fill_value=0)
-    mask1b  = np.ma.masked_where(B == 4, mask_1b) # mask enhancing tumor to 1
-    mask_1b=np.ma.filled(mask1b, fill_value=1)
-    di,all_di=dice(mask_1a,mask_1b)
-    return di,all_di
-######################################################################
-#function colled by the upsampling layer to expand the each slice of the 
-#incoming tensor.
-def unpool(value, name='unpool'):
-    """
-    :param value: A Tensor of shape [b, w,h, ch]
-    :return: An upsampled Tensor of shape [b, 2*w+1, 2*h+1, ch]
-    -> the output tensor will have alternating zeros and padded.
-    e.g.
-    input:      1 2 
-                3 4
-
-    output:  0 0 0 0 0
-             0 1 0 2 0
-             0 0 0 0 0
-             0 3 0 4 0
-             0 0 0 0 0
-    """
-    with tf.name_scope(name) as scope:
-        sh = value.get_shape().as_list()
-        dim = len(sh[1:-1])
-        out = (tf.reshape(value, [-1] + sh[-dim:]))
-        for i in range(dim, 0, -1):
-            out = tf.concat([out, tf.zeros_like(out)], i)
-        out_size = [-1] + [s * 2 for s in sh[1:-1]] + [sh[-1]]
-        out_before_pad = tf.reshape(out, out_size, name=scope)
-        paddings = tf.constant([[0, 0,], [1, 0], [1, 0], [0, 0,]])
-        out=tf.pad(out_before_pad, paddings, "CONSTANT")
-    return out
-####################################################
-# Function to Pool a tensor using idices from another max pooling:   
-def get_pooled(indices,other_tensor):
-    #inputs: 
-    #indeces: from pooling the mean tensor
-    #other_tensor: (sigma) tensor to pool
-    # Returns pooled sigma (other_tensor_pooled) 
-    b = other_tensor.shape[0]
-    w = other_tensor.shape[1]
-    h=other_tensor.shape[2]
-    c =other_tensor.shape[3]
-    other_tensor_pooled = tf.gather(tf.reshape(other_tensor,shape= [b*w*h*c,]),indices)
-    return other_tensor_pooled
-##############################################################################
-def expand_to_shape(data, shape, border='CONSTANT'):
-    """
-    Expands the array to the given image shape by padding it with a border (expects a tensor of shape [batches, nx, ny, channels].
-    :param data: the array to expand
-    :param shape: the target shape
-    :param border: default CONSTANT -> alternatives: "SYMMETRIC" , "REFLECT"(probably not useful)
-    """
-    diff_nx = shape[1] - data.shape[1]
-    diff_ny = shape[2] - data.shape[2]
-    #NEEDED IF LEFT & RIGHT (TOP & BOTTOM) ARE DIFFERENT
-    offset_nx_left = diff_nx // 2
-    offset_ny_left = diff_ny // 2
-    offset_nx_right = diff_nx - offset_nx_left
-    offset_ny_right = diff_ny - offset_ny_left
-    paddings = tf.constant([[0, 0,], [offset_nx_left, offset_nx_right], [offset_ny_left,offset_ny_right], [0, 0,]])
-    expanded = tf.pad(data,paddings, border )
-    return expanded
-##################################################################################
-# Function to crop tensor x1 according to shape given by tensor x2
-def crop_tensor(x1,x2):
-    with tf.name_scope("crop"):
-        x1_shape = tf.shape(x1) # tensor coming from encoder path
-        x2_shape = tf.shape(x2) # corresponding tensor from decoder
-        # offsets for the top left corner of the crop:
-        offsets = [0, (x1_shape[1] - x2_shape[1]) // 2, (x1_shape[2] - x2_shape[2]) // 2, 0]
-        size = [-1, x2_shape[1], x2_shape[2], -1]
-        x1_crop = tf.slice(x1, offsets, size)
-        return x1_crop
-#########################################################################
-# This function computes the gradient of the ReLU function 
-def grad_ReLU(mu_in):
-  with tf.GradientTape() as g:
-    g.watch(mu_in)
-    out = tf.nn.relu(mu_in)
-  gradi = g.gradient(out, mu_in) 
-  return gradi
-#################################################################################
-# The class that propagates the mean and covariance matrix of the variational distribution 
-# through the First Convolution Layer     
-class myConv_input(tf.keras.layers.Layer):
-    """y = Conv(x, w )"""
-    """ x is constant and w is a r.v."""
-    def __init__(self, kernel_num = 128,kernel_size=3, kernel_stride=1, padding="VALID",
-                    mean_mu=0,mean_sigma=0.1, sigma_min=-12, sigma_max=-4.6):
-        super(myConv_input, self).__init__()
-        self.kernel_size = kernel_size #param kernel_size:  Size of the conv, kernel (Default   3)
-        self.kernel_num = kernel_num #param out_channels: Number of Kernels (Required)
-        self.kernel_stride = kernel_stride #param stride: Stride Length (Default   1)
-        self.padding = padding 
-        self.mean_mu =mean_mu
-        self.mean_sigma=mean_sigma
-        self.sigma_min =sigma_min
-        self.sigma_max = sigma_max
-
-    def build(self, input_shape):
-        tau = 1.
-        MYinitializer = tf.keras.initializers.TruncatedNormal(mean=self.mean_mu, stddev=self.mean_sigma) 
-        dim = self.kernel_size * self.kernel_size
-        self.w_mu = self.add_weight(name='w_mu1',
-            shape=(self.kernel_size,self.kernel_size, input_shape[-1], self.kernel_num),
-            initializer=MYinitializer, regularizer=tf.keras.regularizers.l2(tau),
-            trainable=True
-        )  
-        self.w_sigma = self.add_weight(name = 'w_sigma1',
-            shape=(self.kernel_num,),
-            initializer=tf.random_uniform_initializer(minval= self.sigma_min, maxval=self.sigma_max,  seed=None), regularizer=sigma_regularizer(dim),
-            trainable=True
-        )   
-                  
-    def call(self, inputs):
-        mu_out = tf.nn.conv2d(inputs, self.w_mu, strides=self.kernel_stride, padding=self.padding )
-        w_sigma = tf.math.softplus(self.w_sigma)
-        vect_sigma=tf.broadcast_to(w_sigma,[self.kernel_size*self.kernel_size*self.w_mu.shape[2], self.kernel_num], name=None)
-        x_patches = tf.image.extract_patches(inputs, sizes=[1, self.kernel_size, self.kernel_size, 1], strides=[1,self.kernel_stride,self.kernel_stride,1], rates=[1,1,1,1], padding = self.padding)
-        x_matrix = tf.reshape(x_patches,[inputs.shape[0], -1, self.kernel_size*self.kernel_size*self.w_mu.shape[2]]) #NON SICURA DELLA SHAPE w_mu[2]
-        sigma=tf.matmul(tf.math.square(x_matrix),vect_sigma)
-        sigma_out=tf.reshape(sigma, mu_out.shape)
-        return mu_out, sigma_out
-###################################################
-# The class that propagates the mean and covariance matrix of the variational distribution 
-# through the Intermediate Convolution Layers     
-class myConv_intermediate(tf.keras.layers.Layer):
-    """y = Conv(x, w )"""
-    """ x and w are both r.v.
-        :param kernel_num: Number of output channels       (Required)
-        :param kernel_size:  Size of the conv, kernel        (Default   3)
-        for 1x1 Convolution: change kernel_size = 1 and kernel_num = num_classes
-        sigma_max= -2.2 (was 2.3 for MNIST)    
-    """
-
-    def __init__(self, kernel_num = 64 ,kernel_size=3, kernel_stride=1, padding="VALID",
-                    mean_mu=0,mean_sigma=0.1, sigma_min=-12, sigma_max=-4.6):
-        super(myConv_intermediate, self).__init__()
-        self.kernel_size = kernel_size #param kernel_size:  Size of the conv, kernel (Default   3)
-        self.kernel_num = kernel_num #param out_channels: Number of Kernels (Required)
-        self.kernel_stride = kernel_stride #param stride: Stride Length (Default   1)
-        self.padding = padding 
-        self.mean_mu =mean_mu
-        self.mean_sigma=mean_sigma
-        self.sigma_min =sigma_min
-        self.sigma_max = sigma_max
-
-    def build(self, input_shape):
-        #print(input_shape)
-        tau = 1.
-        MYinitializer =tf.keras.initializers.TruncatedNormal(mean=self.mean_mu, stddev=self.mean_sigma)
-        dim = self.kernel_size * self.kernel_size
-        self.w_mu = self.add_weight(name='w_mu',
-            shape=(self.kernel_size,self.kernel_size, input_shape[-1], self.kernel_num),
-            initializer=MYinitializer, regularizer=tf.keras.regularizers.l2(tau),
-            trainable=True
-        )  
-        self.w_sigma = self.add_weight(name = 'w_sigma',
-            shape=(self.kernel_num,),
-            initializer=tf.random_uniform_initializer(minval= self.sigma_min, maxval=self.sigma_max, seed=None), regularizer=sigma_regularizer(dim), 
-            trainable=True
-        )   
-                  
-    def call(self, inputs, sigma_input):
-        mu_out = tf.nn.conv2d(inputs, self.w_mu, strides=self.kernel_stride, padding=self.padding )
-        w_sigma = tf.math.softplus(self.w_sigma)
-        vect_sigma=tf.broadcast_to(w_sigma,[self.kernel_size*self.kernel_size*inputs.shape[-1], self.kernel_num], name=None)
-        x_patches = tf.image.extract_patches(inputs, sizes=[1, self.kernel_size, self.kernel_size, 1], strides=[1,self.kernel_stride,self.kernel_stride,1], rates=[1,1,1,1], padding = self.padding)
-        sigma_patches =tf.image.extract_patches(sigma_input, sizes=[1, self.kernel_size, self.kernel_size, 1], strides=[1,self.kernel_stride,self.kernel_stride,1], rates=[1,1,1,1], padding = self.padding)
-        x_matrix = tf.reshape(x_patches,[inputs.shape[0], mu_out.shape[1]*mu_out.shape[1], self.kernel_size*self.kernel_size*inputs.shape[-1]]) 
-        sigma_matrix = tf.reshape(sigma_patches,[inputs.shape[0], mu_out.shape[1]*mu_out.shape[1], self.kernel_size*self.kernel_size*inputs.shape[-1]])
-        sigma1=tf.matmul(tf.math.square(x_matrix),vect_sigma)
-        w_mean=tf.reshape(self.w_mu,[-1,inputs.shape[-1],self.kernel_num])
-        w_mean=tf.reshape(w_mean,[-1,self.kernel_num])
-        sigma2=tf.matmul(sigma_matrix, tf.math.square(w_mean))
-        sigma3=tf.matmul(sigma_matrix,vect_sigma)
-        sigma=sigma1+sigma2+sigma3 # shape=[batch,new_image_size*new_image_size,num_kernels]
-        sigma_out=tf.reshape(sigma, mu_out.shape) # shape=[batch,new_image_size,new_image_size,num_kernels]
-        
-        return mu_out, sigma_out
-##########################################################
-#propagates mean and covariance through the upsampling layer 
-class myupsampling(keras.layers.Layer):
-    """My_Upsampling"""
-
-    def __init__(self):
-        super(myupsampling, self).__init__()
-    def call(self, mu_in, sigma_in):
-        mu_out = unpool(mu_in)
-        sigma_out = unpool(sigma_in)
-        return mu_out, sigma_out
-##############################################
-#propagates mean and covariance through a padding layer (we pad mean and sigma in decoder)
-class mypadding(keras.layers.Layer):
-    """My_Padding"""
-
-    def __init__(self, pad_size = [2,2], sigma_fill = 0, mode= "CONSTANT"):
-        super(mypadding, self).__init__()
-        self.size = pad_size
-        self.sigma =sigma_fill
-        self.mode = mode
-    def call(self, mu_in, sigma_in):
-        paddings = tf.constant([[0, 0,], self.size, self.size, [0, 0,]])
-        mu_out = tf.pad(mu_in,paddings, self.mode )
-        sigma_out = tf.pad(sigma_in,paddings, self.mode,  constant_values=self.sigma ) #, constant_values=self.sigma
-        return mu_out, sigma_out
-##############################################
-# Function to propagate mean and covariance through the pooling layer 
-class mymaxpooling(keras.layers.Layer):
-    """My_Max_Pooling"""
-
-    def __init__(self):
-        super(mymaxpooling, self).__init__()
-    def call(self, mu_in, sigma_in):
-        mu_out, argmax = tf.nn.max_pool_with_argmax(mu_in, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME', include_batch_in_index=True) #shape=[1, new_size,new_size,num_filters[0]]  
-        sigma_out= get_pooled(argmax,sigma_in)
-        return mu_out, sigma_out
-####################################################################
-#Propagates mean and variance through the ReLU function 
-class myReLU(keras.layers.Layer):
-    """ReLU"""
-
-    def __init__(self):
-        super(myReLU, self).__init__()
-    def call(self, mu_in, Sigma_in):
-        mu_out = tf.nn.relu(mu_in)
-        gradi = grad_ReLU(mu_in) 
-        gradi_sq=tf.math.square(gradi)
-        Sigma_out = tf.math.multiply(gradi_sq,Sigma_in)
-        return mu_out, Sigma_out
-############################################################################
-# Function to Concatenate tensors from encoder and decoder paths  
-class myConc(keras.layers.Layer):
-    """Concatenation of downsampled (to be cropped) and upsampled feature maps
-    inputs: mu_Decoder, Sigma_Decoder,mu_Encoder, Sigma_Encoder"""
-
-    def __init__(self):
-        super(myConc, self).__init__()
-    def call(self, muD, SigmaD,muE, SigmaE):
-        """
-        Concatenation of Upsampled (from Decoder path) muD and SigmaD 
-        with muE and SigmaE (corresponding Encoder tensors) respectively
-        Args:
-            inputs  muE and SigmaE (4-D Tensor): (N, H1, W1, C1), 
-            inputs  muD and SigmaD (4-D Tensor): (N, H2, W2, C2)
-        Returns:
-            output (4-D Tensor): (N, H2, W2, C1 + C2)
-        """
-        mu_cropped = crop_tensor(muE,muD)
-        sigma_cropped = crop_tensor(SigmaE,SigmaD)
-        mu_out = tf.concat([muD, mu_cropped], axis=-1)
-        sigma_out = tf.concat([SigmaD, sigma_cropped], axis=-1)
-        return mu_out, sigma_out
-#############################################################################
-# The class that propagates the mean and covariance matrix of the variational distribution through the Softmax layer
-class mysoftmax(keras.layers.Layer):
-    """Mysoftmax pixel-wise"""
-
-    def __init__(self):
-        super(mysoftmax, self).__init__()
-    def call(self, mu_in, sigma_in):
-        mu_reshaped = tf.reshape(mu_in,[mu_in.shape[0], -1, mu_in.shape[3]])#shape=[Batch, size*size, num_labels]
-        sigma_reshaped = tf.reshape(sigma_in,[sigma_in.shape[0], -1, sigma_in.shape[3]])#shape=[Batch, size*size, num_labels]
-        mu_out = tf.nn.softmax(mu_reshaped)
-        pp1 = tf.expand_dims(mu_out, axis=3)
-        pp2 = tf.expand_dims(mu_out, axis=2)
-        ppT = tf.matmul(pp1, pp2)
-        p_diag = tf.linalg.diag(mu_out)
-        grad = p_diag - ppT
-        grad_sq = tf.math.square(grad)
-        sigma_exp= tf.expand_dims(sigma_reshaped,axis=3)
-        sigma = tf.matmul(grad_sq, sigma_exp)
-        sigma_out= tf.squeeze(sigma)
-        #mu_out and sigma_out shape = [bath, size*size, num_labels] 
-        return mu_out, sigma_out
-
-#######################################################################################
-# the log-likelihood of the objective function
-# Inputs: 
-#       y_pred_mean: The output Mean vector (predictive mean).
-#       y_pred_sd: The output Variance vector (from predictive covariance matrix).
-#       y_test: The ground truth prediction vector
-# Output:
-#       the expected log-likelihood term of the objective function  
-def nll_gaussian(y_test, y_pred_mean, y_pred_sd): 
-
-    eps=tf.constant(1e-3, shape=y_pred_sd.shape, name='epsilon')
-    y_pred_sd_inv =  tf.math.reciprocal(tf.math.add(y_pred_sd, eps)) #Computes the reciprocal element-wise
-    mu_square =  tf.math.square(y_pred_mean - y_test) 
-    mu_square = tf.expand_dims(mu_square, axis=2)
-    y_pred_sd_inv = tf.expand_dims(y_pred_sd_inv, axis=3) 
-    loss1 =  tf.matmul(mu_square ,  y_pred_sd_inv) 
-    loss = tf.reduce_mean(loss1, axis =0)
-    loss = tf.reduce_mean(loss)
-    #print('null gaussian loss1 ',loss)
-    
-    loss = tf.where(tf.math.is_nan(loss), tf.zeros_like(loss), loss)
-    loss = tf.where(tf.math.is_inf(loss), tf.zeros_like(loss), loss)
-    
-    loss2 = tf.math.reduce_prod(tf.math.add(y_pred_sd, eps), axis=-1) # shape [batch,size*size]
-    loss2 = tf.math.log(loss2)
-    loss2 = tf.reduce_mean(loss2) # not sure if I should do reduce mean
-    #print('loglike part2', loss2)
-    final_loss = 0.5*(loss+loss2)
-    return final_loss
-########################################IMPLEMENTED#######################
-# This function computes the sigma regulirizer for the KL-divergence for convolution layers.
-class sigma_regularizer(keras.regularizers.Regularizer):
-    def __init__(self, strength):
-        self.strength = strength
-
-    def __call__(self, x):
-        f_s = tf.math.softplus(x) 
-        return -self.strength * tf.reduce_mean(1. + tf.math.log(f_s) - f_s , axis=-1)
-################################################################
-
-# This class defines the netwrok by calling all layers          
-class Density_prop_with_pad_UNET(tf.keras.Model):
-  """ Required: number_of_kernels and number_of_labels"""
-
-  def __init__(self, n_kernels, n_labels, name=None):
-    super(Density_prop_with_pad_UNET, self).__init__()
-
-    self.n_kernels = n_kernels
-    self.n_out = n_labels
-    self.conv_input = myConv_input(kernel_num = self.n_kernels)  
-    self.conv1 = myConv_intermediate(kernel_num = self.n_kernels) 
-
-    self.conv2 = myConv_intermediate(kernel_num = self.n_kernels*2)  
-    self.conv3 = myConv_intermediate(kernel_num = self.n_kernels*2)
-
-    self.conv4 = myConv_intermediate(kernel_num = self.n_kernels*4) 
-    self.conv5 = myConv_intermediate(kernel_num = self.n_kernels*4)
-
-
-    self.conv6 = myConv_intermediate(kernel_num = self.n_kernels*8)  
-    self.conv7 = myConv_intermediate(kernel_num = self.n_kernels*8)
-
-    self.conv8 = myConv_intermediate(kernel_num = self.n_kernels*16)  
-    self.conv9 = myConv_intermediate(kernel_num = self.n_kernels*16)
-
-    # now starting with decoder path
-
-    self.up1_conv2x2 = myConv_intermediate(kernel_num = self.n_kernels*8, kernel_size = 2, sigma_min=-4.6, sigma_max=-2.2)  
-    self.up1_conv1 = myConv_intermediate(kernel_num = self.n_kernels*8)
-    self.up1_conv2 = myConv_intermediate(kernel_num = self.n_kernels*8)
-    
-    self.up2_conv2x2 = myConv_intermediate(kernel_num = self.n_kernels*4, kernel_size = 2, sigma_min=-4.6, sigma_max=-2.2)  
-    self.up2_conv1 = myConv_intermediate(kernel_num = self.n_kernels*4)
-    self.up2_conv2 = myConv_intermediate(kernel_num = self.n_kernels*4)
-
-    self.up3_conv2x2 = myConv_intermediate(kernel_num = self.n_kernels*2, kernel_size = 2)  
-    self.up3_conv1 = myConv_intermediate(kernel_num = self.n_kernels*2)
-    self.up3_conv2 = myConv_intermediate(kernel_num = self.n_kernels*2)
-
-
-    self.up4_conv2x2 = myConv_intermediate(kernel_num = self.n_kernels, kernel_size = 2)  
-    self.up4_conv1 = myConv_intermediate(kernel_num = self.n_kernels)
-    self.up4_conv2 = myConv_intermediate(kernel_num = self.n_kernels)
-
-
-    self.conv_final = myConv_intermediate(kernel_num = self.n_out, kernel_size = 1, sigma_min=-4.6, sigma_max=-2.2) 
-    self.myrelu  = myReLU()
-    self.myconc = myConc()
-    self.mypad1 = mypadding(pad_size=[1,0], sigma_fill=0.1)
-    self.mypad_up6 = mypadding(pad_size=[3,3],sigma_fill=0.1) 
-    self.mypad = mypadding(sigma_fill=0.1)
-    self.myups =  myupsampling()
-    self.maxp =mymaxpooling()
-    self.mysoftmax = mysoftmax()
-
-  def call(self, inputs, training=True):
-    # first block encoder:
-    m1, s1 = self.conv_input(inputs) # 202
-    m1, s1 = self.myrelu(m1, s1) # 
-    m1, s1 =  self.conv1(m1, s1)  # 200
-    m1, s1 = self.myrelu(m1, s1)  
-    m1_p, s1_p = self.maxp(m1, s1) #  100
-    # second block encoder:
-    m2, s2 = self.conv2(m1_p, s1_p) # 98
-    m2, s2 = self.myrelu(m2, s2) 
-    m2, s2 =  self.conv3(m2, s2) # 96
-    m2, s2 = self.myrelu(m2, s2)  
-    m2_p, s2_p = self.maxp(m2, s2) # 48
-    # third block encoder: 
-    m3, s3 = self.conv4(m2_p, s2_p) # 46
-    m3, s3 = self.myrelu(m3, s3) 
-    m3, s3 =  self.conv5(m3, s3) # 44
-    m3, s3 = self.myrelu(m3, s3)  
-    m3_p, s3_p = self.maxp(m3, s3) # 22
-    # 4th block encoder: 
-    m4, s4 = self.conv6(m3_p, s3_p) # 20
-    m4, s4 = self.myrelu(m4, s4) 
-    m4, s4 =  self.conv7(m4, s4) # 18
-    m4, s4 = self.myrelu(m4, s4) 
-    m4_p, s4_p = self.maxp(m4, s4)  #9 
-    
-    # 5th block encoder:
-    m5, s5 = self.mypad1(m4_p, s4_p) # 10
-    m5, s5 = self.conv8(m5, s5) #8
-    m5, s5 = self.myrelu(m5, s5) 
-    m5, s5 =  self.conv9(m5, s5) # 6
-    m5, s5 = self.myrelu(m5, s5)
-    
-    # first block decoder:
-    d_m1, d_s1 = self.myups(m5, s5) 
-    d_m1, d_s1 = self.up1_conv2x2(d_m1, d_s1) #12
-    d_m1, d_s1 = self.mypad_up6(d_m1, d_s1) # 18
-    d_m1, d_s1 = self.myconc(d_m1, d_s1, m4, s4)
-    d_m1, d_s1 = self.up1_conv1(d_m1, d_s1 ) #16
-    d_m1, d_s1 = self.myrelu(d_m1, d_s1)
-    d_m1, d_s1 = self.mypad(d_m1, d_s1) #20
-    d_m1, d_s1 =  self.up1_conv2(d_m1, d_s1) #18
-    d_m1, d_s1 = self.myrelu(d_m1, d_s1)
-    # second block decoder:
-    d_m2, d_s2 = self.myups(d_m1, d_s1) 
-    d_m2, d_s2 = self.up2_conv2x2(d_m2, d_s2) #36
-    d_m2, d_s2 = self.mypad_up6(d_m2, d_s2) #42
-    d_m2, d_s2 = self.myconc(d_m2, d_s2, m3, s3)
-    d_m2, d_s2 = self.up2_conv1(d_m2, d_s2) #40
-    d_m2, d_s2 = self.myrelu(d_m2, d_s2)
-    d_m2, d_s2 = self.mypad(d_m2, d_s2) #44
-    d_m2, d_s2 =  self.up2_conv2(d_m2, d_s2) #42
-    d_m2, d_s2 = self.myrelu(d_m2, d_s2)
-    # third block decoder:
-    d_m3, d_s3 = self.myups(d_m2, d_s2) 
-    d_m3, d_s3 = self.up3_conv2x2(d_m3, d_s3) #84
-    d_m3, d_s3 = self.mypad_up6(d_m3, d_s3) #90
-    d_m3, d_s3 = self.myconc(d_m3, d_s3, m2,s2)
-    d_m3, d_s3 = self.up3_conv1(d_m3, d_s3) #88
-    d_m3, d_s3 = self.myrelu(d_m3, d_s3)
-    d_m3, d_s3 = self.mypad(d_m3, d_s3)  #92
-    d_m3, d_s3 =  self.up3_conv2(d_m3, d_s3) #90
-    d_m3, d_s3 = self.myrelu(d_m3, d_s3)  
-    # 4th block decoder:
-    d_m4, d_s4 = self.myups(d_m3, d_s3)
-    d_m4, d_s4 = self.up4_conv2x2(d_m4, d_s4)  #180
-    d_m4, d_s4 = self.mypad_up6(d_m4, d_s4) #186
-    d_m4, d_s4 = self.myconc(d_m4, d_s4, m1,s1)
-    d_m4, d_s4 = self.up4_conv1(d_m4, d_s4) #184
-    d_m4, d_s4 = self.myrelu(d_m4, d_s4)
-    d_m4, d_s4 = self.mypad(d_m4, d_s4) #188
-    d_m4, d_s4 =  self.up4_conv2(d_m4, d_s4) #186
-    d_m4, d_s4 = self.myrelu(d_m4, d_s4)
-   
-    m_final, s_final =  self.conv_final(d_m4, d_s4 )
-    outputs, Sigma= self.mysoftmax(m_final, s_final) # output images are flattened (& sigma vector)
-    #shape [batch, out_image_size*out_image_size, n_labels]
-    return outputs, Sigma
-
-def crop_to_wanted_shape(x, shape):
-    """ function to crop input image to wanted shape:
-    _______________________________________________________
-    inputs: x = tensor to crop, shape = choosen dimension"""
-    
-    x1_shape = tf.shape(x) # tensor
-    # offsets for the top left corner of the crop:
-    offsets = [0, (x1_shape[1] - shape) // 2, (x1_shape[2] - shape) // 2, 0]
-    size = [-1,shape, shape, -1]
-    x1_crop = tf.slice(x, offsets, size)
-    return x1_crop
-
-def crop_numpy_image(x,shape, num_ch = 3):
-    """ function to crop input image to wanted shape when images are fed as numpy arrays:
-    _______________________________________________________
-    inputs: x = tensor to crop, shape = choosen dimension"""
-    or_size = x.shape[1]
-    start =(or_size - shape)/2 # starting point to slice image
-    start = int(start)
-    end_p = or_size - start
-    end_p = int(end_p)
-    
-    if num_ch==3:
-        im = x[:,start:end_p, start:end_p,:]
-    else:
-        im = x[:,start:end_p, start:end_p]
-    return im
-    
-# main function is used to train and build the adversarial attacks
+#################################################################################################################
+# MAIN FUNCTION USED TO TRAIN AND BUILD ADVERSARIAL ATTACKS
 def main_function(n_kernels=32, output_channels = 5, batch_size=20, epochs = 100, lr=0.001,lr_end=0.001, kl_factor = 0.00001,
           Training = False, continue_training =False, saved_model_epochs=100, Adversarial_noise=True,  
         epsilon = 0.0001, Targeted=True, maxAdvStep=20, stepSize =1, adversary_targeted_class = 2 
         , adv_class = 3):  
     
     
-    PATH = '/data/giuse/saved_models_VMP/new_code/epoch_{}/'.format(epochs) 
+    PATH = './Segmentation_data/Brats/saved_models_VMP/epoch_{}/'.format(epochs) 
     if not os.path.exists( PATH):
         os.makedirs(PATH)  	    
     output_size = output_channels 
@@ -785,7 +809,7 @@ def main_function(n_kernels=32, output_channels = 5, batch_size=20, epochs = 100
           return signed_grad, loss
     if Training:
         if continue_training: 
-            saved_model_path = './saved_models_VMP/new_code/epoch_{}/'.format(saved_model_epochs)
+            saved_model_path = './Segmentation_data/Brats/saved_models_VMP/epoch_{}/'.format(saved_model_epochs)
             UNET_model.load_weights(saved_model_path + 'vdp_UNET_model')
         train_acc = np.zeros(epochs) 
         valid_acc = np.zeros(epochs)
@@ -1212,12 +1236,7 @@ def main_function(n_kernels=32, output_channels = 5, batch_size=20, epochs = 100
             textfile.write("\n SNR: "+ str(batch_SNR/n_test_steps))               
         textfile.write("\n---------------------------------")    
         textfile.close()
-        
-
-if __name__ == '__main__':
-    main_function()
-    main_function(epsilon = 0.000005, maxAdvStep=20, adversary_targeted_class=2, adv_class = 3) 
-    main_function(epsilon = 0.000005, maxAdvStep=20, adversary_targeted_class=3, adv_class = 2)
+#################################################################################################################
 
 # functions to test on noise free data and with added Gaussian noise
 def testing(epochs, labels, gaussain_noise_std, slices = 4, n_kernels = 32,Random_noise =False, noise_on = 'B'):
@@ -1227,7 +1246,7 @@ def testing(epochs, labels, gaussain_noise_std, slices = 4, n_kernels = 32,Rando
     n_test_steps =100
     UNET_model = Density_prop_with_pad_UNET(n_kernels, output_size, name = 'vdp_unet')
     
-    PATH = '/data/giuse/saved_models_VMP/new_code/epoch_{}/'.format(epochs) 
+    PATH = './Segmentation_data/Brats/saved_models_VMP/epoch_{}/'.format(epochs) 
     
      
     if Random_noise:
@@ -1266,7 +1285,7 @@ def testing(epochs, labels, gaussain_noise_std, slices = 4, n_kernels = 32,Rando
     all_dice_coef2 = []
     all_dice_coef3 = []
     for step in range(n_test_steps): 
-            t2 = open('/data/giuse/Data_all/batched_data/test_batch_{}.pkl'.format(test_no_steps), 'rb')
+            t2 = open('./Segmentation_data/Brats/Data_all/batched_data/test_batch_{}.pkl'.format(test_no_steps), 'rb')
             x, y = pickle.load(t2)                                                               
             t2.close()      
             x = tf.dtypes.cast(x, tf.float32)
@@ -1371,7 +1390,7 @@ def testing(epochs, labels, gaussain_noise_std, slices = 4, n_kernels = 32,Rando
     variance = np.take_along_axis(sigma_, np.expand_dims(predicted_y.numpy(), axis=-1), axis=-1).squeeze(axis=-1)
     variance = np.mean(variance)
     print('Test Dice Coefficients : ', test_d1, test_d2, test_d3) 
-    data_folder =  '/data/giuse/saved_models_VMP/new_code/epoch_{}/'.format(epochs) 
+    data_folder =  './Segmentation_data/Brats/saved_models_VMP/epoch_{}/'.format(epochs) 
     if Random_noise:
             print('Test average snr signal : ',new_t_snr)
             if noise_on == 'O':
@@ -1464,12 +1483,19 @@ def save_uncertainty(path,images_n, noise, where_noise ):
     file1.close()  
     mean_u,  mean_background, mean_tumor, class1_unc, class2_unc, class3_unc, enh_unc = save_adversarial_uncertainty(path, truex, 0, logits, truey, sigma, 0,images_n,Adversarial=False )
     return mean_u,  mean_background, mean_tumor, class1_unc, class2_unc, class3_unc, enh_unc
+####################################################################################################
+# (1) train, (2) build and test with adversarial attacks, (3) select noise levels and test       
+
+if __name__ == '__main__':
+    main_function()
+    main_function(epsilon = 0.000005, maxAdvStep=20, adversary_targeted_class=2, adv_class = 3) 
+    main_function(epsilon = 0.000005, maxAdvStep=20, adversary_targeted_class=3, adv_class = 2)
 
 # Gaussian Noise Values
 noise = [0.002,0.0015,0.001,0.0008, 0.0005,0.0003, 0.0002, 0.0001, 0.00005, 0.00001]
 
 l = len(noise)
-epochs = 100
+epochs = 100 # number of epochs with saved model
 labels = 5
 
 

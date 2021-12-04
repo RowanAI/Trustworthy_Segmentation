@@ -1,8 +1,8 @@
-# Trustworthy Medical Segmentation with Uncertainty Estimation
+### Copyright (C) <2021>  <Giuseppina Carannante, Dimah Dera, Ghulam Rasool, Nidhal Bouaynaya, and Hassan M. Fathallah-Shaykh>
+### Paper :Trustworthy Medical Segmentation with Uncertainty Estimation
+
 # VMP Implementation for Hippocampus DATA 
 # U-NET structure with 3 encoding and 2 decoding blocks
-# Giuseppina Carannante
-
 
 import tensorflow as tf
 from tensorflow import keras
@@ -20,278 +20,23 @@ from scipy import ndimage
 import pandas as pd
 plt.ioff()
 from mpl_toolkits import axes_grid1
-
-def softplus(x):
-    return np.log(1 + np.exp(x))   
-def add_colorbar(im, aspect=20, pad_fraction=0.5, **kwargs):
-    """Add a vertical color bar to an image plot."""
-    divider = axes_grid1.make_axes_locatable(im.axes)
-    width = axes_grid1.axes_size.AxesY(im.axes, aspect=1./aspect)
-    pad = axes_grid1.axes_size.Fraction(pad_fraction, width)
-    current_ax = plt.gca()
-    cax = divider.append_axes("right", size=width, pad=pad)
-    plt.sca(current_ax)
-    return im.axes.figure.colorbar(im, cax=cax, **kwargs)
-
-def save_adversarial_uncertainty(path,truex,adv, logits, truey,sigma,masked, images_n, Adversarial = True, targeted=True):
-    """
-    function to generate images 
-    """
-    path_full= path + './test_images/'
-    if not os.path.exists(path_full):
-        os.makedirs(path_full)
-
-    N = 403 # number of test images to consider
-    predict2 = np.argmax(logits, axis = -1)
-    uncert= np.take_along_axis(sigma, np.expand_dims(predict2, axis=-1), axis=-1).squeeze(axis=-1)
-    
-    mean_u = np.mean(uncert)
-    np.random.seed(3) 
-    ind=np.random.choice(np.arange(N), images_n)
-   
-    n = 0
-    
-    cMap = []
-    for value, colour in zip([0, 1, 2],["Black", "Yellow", "Red"]): cMap.append((value/2., colour))
-    customColourMap = LinearSegmentedColormap.from_list("custom", cMap)
-    for i in ind:
-        u = uncert[i,:,:]
-        if Adversarial:
-         M = masked[i,:,:]
-        P = predict2[i,:,:]
-        L = truey[i,:,:]
-        if Adversarial:
-            plt.figure()
-            plt.imshow(np.squeeze(truex[i,:,:]), 'gray', interpolation='none')
-            plt.imshow(np.squeeze(adv[i,:,:]),'gray', interpolation='none', alpha= 0.8)
-            ax = plt.gca()
-            ax.axes.xaxis.set_visible(False)
-            ax.axes.yaxis.set_visible(False)
-            plt.savefig(path_full + '{}_Adversarial_noise.png'.format(i))
-            plt.close()
-        
-        plt.figure(figsize=(10,10))
-        plt.imshow(L, customColourMap, interpolation='none')
-        plt.title("Ground truth Label") 
-        ax = plt.gca()
-        ax.axes.xaxis.set_visible(False)
-        ax.axes.yaxis.set_visible(False)
-        plt.savefig(path_full + '{}_Label_image.png'.format(i))
-        plt.close()
-
-
-        plt.figure(figsize=(10,10))
-        plt.imshow(P, customColourMap, interpolation='none')
-        plt.title("Predicted Label") 
-        ax = plt.gca()
-        ax.axes.xaxis.set_visible(False)
-        ax.axes.yaxis.set_visible(False)
-        plt.savefig(path_full + '{}_Predicted_image.png'.format(i))
-        plt.close()
-
-        plt.figure(figsize=(10,10))
-        im= plt.imshow(u, cmap='winter_r', interpolation='nearest')
-        plt.title("Uncertainty map") 
-        add_colorbar(im)
-        #plt.clim(m_un,mx_un)
-        ax = plt.gca()
-        ax.axes.xaxis.set_visible(False)
-        ax.axes.yaxis.set_visible(False)
-        plt.savefig(path_full +'{}_uncertainty_heatmap.png'.format(i))
-        plt.close()
-
-        if Adversarial:
-         if targeted:
-            plt.figure(figsize=(10,10))
-            plt.imshow(M, customColourMap, interpolation='none')
-            plt.title("Masked Label") 
-            ax = plt.gca()
-            ax.axes.xaxis.set_visible(False)
-            ax.axes.yaxis.set_visible(False)
-            plt.savefig(path_full + '{}_Masked_Label_image.png'.format(i))
-            plt.close()
-
-    
-    # creating uncertainty file to record the predictive variance for 2 binary tasks:
-    ##task 1: Everything vs Anterior
-    mask1ant  = np.ma.masked_where(predict2 != 1, uncert) # masking all non-anterior
-    anterior_unc = np.mean(mask1ant)
-    mask2ant  = np.ma.masked_where(predict2 == 1, uncert) # masking  anterior 
-    no_ant_unc = np.mean(mask2ant)
-    ##task 2: Everything vs Posterior
-    mask1po  = np.ma.masked_where(predict2 != 2, uncert) # masking all non-posterior
-    posterior_unc = np.mean(mask1po)
-    mask2po  = np.ma.masked_where(predict2 == 2, uncert) # masking posterior
-    no_po_unc = np.mean(mask2po)
-
-
-
-    textfile = open(path + 'Predictive_variance_tasks.txt','w')
-    textfile.write('\n Average Predictive variance : ' +str(mean_u)) 
-    textfile.write("\n---------------------------------")
-    textfile.write('\n Predictive variance for all  anterior structures : ' +str(anterior_unc))         
-    textfile.write('\n Predictive variance for non-anterior structures : ' +str(no_ant_unc)) 
-    textfile.write("\n---------------------------------")
-    textfile.write('\n Predictive variance for posterior portion : ' +str(posterior_unc))         
-    textfile.write('\n Predictive variance for non-posterior structures : ' +str(no_po_unc)) 
-    textfile.close()
-    print('done saving uncertainty and creating images')
-    return mean_u,  anterior_unc, posterior_unc
 from keras import backend as K  
-###############################################################################
-# update_progress() : Displays or updates a console progress bar
-## Accepts a float between 0 and 1. Any int will be converted to a float.
-## A value under 0 represents a 'halt'.
-## A value at 1 or bigger represents 100%
 
-def update_progress(progress):
-    barLength = 10 # Modify this to change the length of the progress bar
-    status = ""
-    if isinstance(progress, int):
-        progress = float(progress)
-    if not isinstance(progress, float):
-        progress = 0
-        status = "error: progress var must be float\r\n"
-    if progress < 0:
-        progress = 0
-        status = "Halt...\r\n"
-    if progress >= 1:
-        progress = 1
-        status = "Done...\r\n"
-    block = int(round(barLength*progress))
-    text = "\rPercent: [{0}] {1}% {2}".format( "#"*block + "-"*(barLength-block), progress*100, status)
-    sys.stdout.write(text)
-    sys.stdout.flush()
-############################################
-# function to compute log base 10 - used for SNR
-def log10(x):
-  numerator = tf.math.log(x)
-  denominator = tf.math.log(tf.constant(10, dtype=numerator.dtype))
-  return numerator / denominator
-############################################
-# DSC 
-def dice(y_true, y_pred):
-    true_mask, pred_mask = y_true, y_pred
-    A=np.sum(true_mask, axis=(1,2))
-    B=np.sum(pred_mask, axis=(1,2))
-    im_sum = A+ B
 
-    # Compute Dice coefficient
-    intersection = np.multiply(true_mask, pred_mask)
-    intersection_sum = np.sum(intersection, axis=(1,2))
-    c=2. * intersection_sum / im_sum
-    c_masked = np.ma.masked_invalid(c)
-    c_masked_avr =np.mean(c_masked)
-    var = np.var(c_masked)
-    return c_masked_avr,var
-###############################################################################################
-# functions to create binary mask to evaluate the results (i.e., compute DSC for each task)
-def mask_anterior(y_true, y_pred):
-    A,B = y_true, y_pred.numpy()
-    mask1a  = np.ma.masked_where(A ==2, A) # masking all posterior 
-    mask_1a=np.ma.filled(mask1a, fill_value=0)
-    mask1b  = np.ma.masked_where(B ==2, B) # masking all posterior
-    mask_1b=np.ma.filled(mask1b, fill_value=0)
-    di,all_di=dice(mask_1a,mask_1b)
-    return di,all_di
-def mask_posterior(y_true, y_pred):
-    A,B = y_true, y_pred.numpy()
-    mask1a  = np.ma.masked_where(A <2, A) # masking anterior
-    mask_1a=np.ma.filled(mask1a, fill_value=0)
-    mask2a  = np.ma.masked_where(mask_1a==2, mask_1a) # masking all posterior structures to 1
-    mask_2a=np.ma.filled(mask2a, fill_value=1)
-
-    mask1b  = np.ma.masked_where(B <2, B) # masking edema to 0
-    mask_1b=np.ma.filled(mask1b, fill_value=0)
-    mask2b  = np.ma.masked_where(mask_1b==2, mask_1b) # masking all remaining tumor structures to 1
-    mask_2b=np.ma.filled(mask2b, fill_value=1)
-    di,all_di=dice(mask_2a,mask_2b)
-    return di,all_di
-######################################################################
-#function colled by the upsampling layer to expand the each slice of the 
-#incoming tensor.
-def unpool(value, name='unpool'):
-    """
-    :param value: A Tensor of shape [b, w,h, ch]
-    :return: An upsampled Tensor of shape [b, 2*w+1, 2*h+1, ch]
-    -> the output tensor will have alternating zeros and padded.
-    e.g.
-    input:      1 2 
-                3 4
-
-    output:  0 0 0 0 0
-             0 1 0 2 0
-             0 0 0 0 0
-             0 3 0 4 0
-             0 0 0 0 0
-    """
-    with tf.name_scope(name) as scope:
-        sh = value.get_shape().as_list()
-        dim = len(sh[1:-1])
-        out = (tf.reshape(value, [-1] + sh[-dim:]))
-        for i in range(dim, 0, -1):
-            out = tf.concat([out, tf.zeros_like(out)], i)
-        out_size = [-1] + [s * 2 for s in sh[1:-1]] + [sh[-1]]
-        out_before_pad = tf.reshape(out, out_size, name=scope)
-        paddings = tf.constant([[0, 0,], [1, 0], [1, 0], [0, 0,]])
-        out=tf.pad(out_before_pad, paddings, "CONSTANT")
-    return out
-####################################################
-# Function to Pool a tensor using idices from another max pooling:   
-def get_pooled(indices,other_tensor):
-    #inputs: 
-    #indeces: from pooling the mean tensor
-    #other_tensor: (sigma) tensor to pool
-    # Returns pooled sigma (other_tensor_pooled) 
-    b = other_tensor.shape[0]
-    w = other_tensor.shape[1]
-    h=other_tensor.shape[2]
-    c =other_tensor.shape[3]
-    other_tensor_pooled = tf.gather(tf.reshape(other_tensor,shape= [b*w*h*c,]),indices)
-    return other_tensor_pooled
-##############################################################################
-def expand_to_shape(data, shape, border='CONSTANT'):
-    """
-    Expands the array to the given image shape by padding it with a border (expects a tensor of shape [batches, nx, ny, channels].
-    :param data: the array to expand
-    :param shape: the target shape
-    :param border: default CONSTANT -> alternatives: "SYMMETRIC" , "REFLECT"
-    """
-    diff_nx = shape[1] - data.shape[1]
-    diff_ny = shape[2] - data.shape[2]
-    #NEEDED IF LEFT & RIGHT (TOP & BOTTOM) ARE DIFFERENT
-    offset_nx_left = diff_nx // 2
-    offset_ny_left = diff_ny // 2
-    offset_nx_right = diff_nx - offset_nx_left
-    offset_ny_right = diff_ny - offset_ny_left
-    paddings = tf.constant([[0, 0,], [offset_nx_left, offset_nx_right], [offset_ny_left,offset_ny_right], [0, 0,]])
-    expanded = tf.pad(data,paddings, border )
-    return expanded
-##################################################################################
-# Function to crop tensor x1 according to shape given by tensor x2
-def crop_tensor(x1,x2):
-    with tf.name_scope("crop"):
-        x1_shape = tf.shape(x1) # tensor coming from encoder path
-        x2_shape = tf.shape(x2) # corresponding tensor from decoder
-        # offsets for the top left corner of the crop:
-        offsets = [0, (x1_shape[1] - x2_shape[1]) // 2, (x1_shape[2] - x2_shape[2]) // 2, 0]
-        size = [-1, x2_shape[1], x2_shape[2], -1]
-        x1_crop = tf.slice(x1, offsets, size)
-        return x1_crop
-#########################################################################
-# This function computes the gradient of the ReLU function 
-def grad_ReLU(mu_in):
-  with tf.GradientTape() as g:
-    g.watch(mu_in)
-    out = tf.nn.relu(mu_in)
-  gradi = g.gradient(out, mu_in) 
-  return gradi
 #################################################################################
 # The class that propagates the mean and covariance matrix of the variational distribution 
 # through the First Convolution Layer     
 class myConv_input(tf.keras.layers.Layer):
     """y = Conv(x, w )"""
-    """ x is constant and w is a r.v."""
+    """ x is constant and w is a r.v.
+        :param kernel_num: Number of output channels       (Default   128)
+        :param kernel_size:  Size of the conv, kernel        (Default   3)
+        :param kernel_stride:  Stride used for the conv.        (Default   1)
+        :param padding:  type of padding used for the conv.        (Default   "VALID")
+        :param(s) mean_mu, mean_sigma:  Mean and Std used for parameters' mean initialization        (Default   0, 0.1)
+        :param(s) sigma_min, sigma_max:  Min and Max used for parameters' sigma initialization       (Default   -12, -4.6)
+        
+    """
     def __init__(self, kernel_num = 128,kernel_size=3, kernel_stride=1, padding="VALID",
                     mean_mu=0,mean_sigma=0.1, sigma_min=-12, sigma_max=-4.6):
         super(myConv_input, self).__init__()
@@ -332,15 +77,19 @@ class myConv_input(tf.keras.layers.Layer):
         # shape =[batch, New_image_size* New_image_size , num_kernels]
         sigma_out=tf.reshape(sigma, mu_out.shape)
         return mu_out, sigma_out
-###################################################
+#################################################################################
 # The class that propagates the mean and covariance matrix of the variational distribution 
 # through the Intermediate Convolution Layers     
 class myConv_intermediate(tf.keras.layers.Layer):
     """y = Conv(x, w )"""
     """ x and w are both r.v.
-        :param kernel_num: Number of output channels       (Required)
+        :param kernel_num: Number of output channels       (Default   64)
         :param kernel_size:  Size of the conv, kernel        (Default   3)
-        for 1x1 Convolution: change kernel_size = 1 and kernel_num = num_classes  
+        :param kernel_stride:  Stride used for the conv.        (Default   1)
+        :param padding:  type of padding used for the conv.        (Default   "VALID")
+        :param(s) mean_mu, mean_sigma:  Mean and Std used for parameters' mean initialization        (Default   0, 0.1)
+        :param(s) sigma_min, sigma_max:  Min and Max used for parameters' sigma initialization       (Default   -12, -4.6)
+        (Note:for 1x1 Convolution: change kernel_size = 1 and kernel_num = num_classes)   
     """
 
     def __init__(self, kernel_num = 64 ,kernel_size=3, kernel_stride=1, padding="VALID",
@@ -392,8 +141,8 @@ class myConv_intermediate(tf.keras.layers.Layer):
         sigma_out=tf.reshape(sigma, mu_out.shape) # shape=[batch,new_image_size,new_image_size,num_kernels]
         
         return mu_out, sigma_out
-##########################################################
-#propagates mean and covariance through the upsampling layer 
+###############################################################################
+# Class that propagates mean and covariance through the upsampling layer 
 class myupsampling(keras.layers.Layer):
     """My_Upsampling"""
 
@@ -403,8 +152,36 @@ class myupsampling(keras.layers.Layer):
         mu_out = unpool(mu_in)
         sigma_out = unpool(sigma_in)
         return mu_out, sigma_out
-##############################################
-#propagates mean and covariance through a padding layer 
+
+def unpool(value, name='unpool'):
+    """
+    function colled by the upsampling layer to expand the each slice of the incoming tensor.
+    :param value: A Tensor of shape [b, w,h, ch]
+    :return: An upsampled Tensor of shape [b, 2*w+1, 2*h+1, ch]
+    -> the output tensor will have alternating zeros and padded.
+    e.g.
+    input:      1 2 
+                3 4
+
+    output:  0 0 0 0 0
+             0 1 0 2 0
+             0 0 0 0 0
+             0 3 0 4 0
+             0 0 0 0 0
+    """
+    with tf.name_scope(name) as scope:
+        sh = value.get_shape().as_list()
+        dim = len(sh[1:-1])
+        out = (tf.reshape(value, [-1] + sh[-dim:]))
+        for i in range(dim, 0, -1):
+            out = tf.concat([out, tf.zeros_like(out)], i)
+        out_size = [-1] + [s * 2 for s in sh[1:-1]] + [sh[-1]]
+        out_before_pad = tf.reshape(out, out_size, name=scope)
+        paddings = tf.constant([[0, 0,], [1, 0], [1, 0], [0, 0,]])
+        out=tf.pad(out_before_pad, paddings, "CONSTANT")
+    return out
+#########################################################################
+#Class that propagates mean and covariance through a padding layer 
 class mypadding(keras.layers.Layer):
     """My_Padding"""
 
@@ -442,8 +219,16 @@ class myReLU(keras.layers.Layer):
         gradi_sq=tf.math.square(gradi)
         Sigma_out = tf.math.multiply(gradi_sq,Sigma_in)
         return mu_out, Sigma_out
+# This function computes the gradient of the ReLU function 
+def grad_ReLU(mu_in):
+  with tf.GradientTape() as g:
+    g.watch(mu_in)
+    out = tf.nn.relu(mu_in)
+  gradi = g.gradient(out, mu_in) 
+  return gradi
+
 ############################################################################
-# Function to Concatenate tensors from encoder and decoder paths 
+# Class with the Function to Concatenate tensors from encoder and decoder paths 
 class myConc(keras.layers.Layer):
     """Concatenation of downsampled (to be cropped) and upsampled feature maps
     inputs: mu_Decoder, Sigma_Decoder,mu_Encoder, Sigma_Encoder"""
@@ -611,7 +396,129 @@ class Density_prop_with_pad_UNET(tf.keras.Model):
     outputs, Sigma= self.mysoftmax(m_final, s_final) # output images are flattened (& sigma vector)
     #shape [batch, out_image_size*out_image_size, n_labels]
     return outputs, Sigma
+########################################################################
+# OTHER FUNCTIONS:
+###############################################################################
+# update_progress() : Displays or updates a console progress bar
+## Accepts a float between 0 and 1. Any int will be converted to a float.
+## A value under 0 represents a 'halt'.
+## A value at 1 or bigger represents 100%
 
+def update_progress(progress):
+    barLength = 10 # Modify this to change the length of the progress bar
+    status = ""
+    if isinstance(progress, int):
+        progress = float(progress)
+    if not isinstance(progress, float):
+        progress = 0
+        status = "error: progress var must be float\r\n"
+    if progress < 0:
+        progress = 0
+        status = "Halt...\r\n"
+    if progress >= 1:
+        progress = 1
+        status = "Done...\r\n"
+    block = int(round(barLength*progress))
+    text = "\rPercent: [{0}] {1}% {2}".format( "#"*block + "-"*(barLength-block), progress*100, status)
+    sys.stdout.write(text)
+    sys.stdout.flush()
+############################################
+##########################################################################################
+# function to generate DSC values 
+def dice(y_true, y_pred):
+    true_mask, pred_mask = y_true, y_pred
+    A=np.sum(true_mask, axis=(1,2))
+    B=np.sum(pred_mask, axis=(1,2))
+    im_sum = A+ B
+
+    # Compute Dice coefficient
+    intersection = np.multiply(true_mask, pred_mask)
+    intersection_sum = np.sum(intersection, axis=(1,2))
+    c=2. * intersection_sum / im_sum
+    c_masked = np.ma.masked_invalid(c)
+    c_masked_avr =np.mean(c_masked)
+    var = np.var(c_masked)
+    return c_masked_avr,var
+###############################################################################################
+# functions to create binary mask to evaluate the results (i.e., compute DSC for each task)
+def mask_anterior(y_true, y_pred):
+    A,B = y_true, y_pred.numpy()
+    mask1a  = np.ma.masked_where(A ==2, A) # masking all posterior 
+    mask_1a=np.ma.filled(mask1a, fill_value=0)
+    mask1b  = np.ma.masked_where(B ==2, B) # masking all posterior
+    mask_1b=np.ma.filled(mask1b, fill_value=0)
+    di,all_di=dice(mask_1a,mask_1b)
+    return di,all_di
+def mask_posterior(y_true, y_pred):
+    A,B = y_true, y_pred.numpy()
+    mask1a  = np.ma.masked_where(A <2, A) # masking anterior
+    mask_1a=np.ma.filled(mask1a, fill_value=0)
+    mask2a  = np.ma.masked_where(mask_1a==2, mask_1a) # masking all posterior structures to 1
+    mask_2a=np.ma.filled(mask2a, fill_value=1)
+
+    mask1b  = np.ma.masked_where(B <2, B) # masking edema to 0
+    mask_1b=np.ma.filled(mask1b, fill_value=0)
+    mask2b  = np.ma.masked_where(mask_1b==2, mask_1b) # masking all remaining tumor structures to 1
+    mask_2b=np.ma.filled(mask2b, fill_value=1)
+    di,all_di=dice(mask_2a,mask_2b)
+    return di,all_di
+######################################################################
+   
+def get_pooled(indices,other_tensor):
+    """Function to Pool a tensor using idices from another max pooling: 
+    inputs: 
+    indeces: from pooling the mean tensor
+    other_tensor: (sigma) tensor to pool
+    Returns: pooled sigma (other_tensor_pooled) 
+    """
+    b = other_tensor.shape[0]
+    w = other_tensor.shape[1]
+    h=other_tensor.shape[2]
+    c =other_tensor.shape[3]
+    other_tensor_pooled = tf.gather(tf.reshape(other_tensor,shape= [b*w*h*c,]),indices)
+    return other_tensor_pooled
+##############################################################################
+def expand_to_shape(data, shape, border='CONSTANT'):
+    """
+    Expands the array to the given image shape by padding it with a border (expects a tensor of shape [batches, nx, ny, channels].
+    :param data: the array to expand
+    :param shape: the target shape
+    :param border: default CONSTANT -> alternatives: "SYMMETRIC" , "REFLECT"
+    """
+    diff_nx = shape[1] - data.shape[1]
+    diff_ny = shape[2] - data.shape[2]
+    #NEEDED IF LEFT & RIGHT (TOP & BOTTOM) ARE DIFFERENT
+    offset_nx_left = diff_nx // 2
+    offset_ny_left = diff_ny // 2
+    offset_nx_right = diff_nx - offset_nx_left
+    offset_ny_right = diff_ny - offset_ny_left
+    paddings = tf.constant([[0, 0,], [offset_nx_left, offset_nx_right], [offset_ny_left,offset_ny_right], [0, 0,]])
+    expanded = tf.pad(data,paddings, border )
+    return expanded
+##################################################################################
+
+def log10(x):
+  """ function to compute log base 10 - (used for SNR)"""
+  numerator = tf.math.log(x)
+  denominator = tf.math.log(tf.constant(10, dtype=numerator.dtype))
+  return numerator / denominator
+def softplus(x):
+    """ softplus function"""
+    return np.log(1 + np.exp(x))   
+
+def crop_tensor(x1,x2):
+    """ Function to crop tensor x1 according to shape given by tensor x2
+    _______________________________________________________
+    inputs:  x1, x2"""
+    with tf.name_scope("crop"):
+        x1_shape = tf.shape(x1) # tensor coming from encoder path
+        x2_shape = tf.shape(x2) # corresponding tensor from decoder
+        # offsets for the top left corner of the crop:
+        offsets = [0, (x1_shape[1] - x2_shape[1]) // 2, (x1_shape[2] - x2_shape[2]) // 2, 0]
+        size = [-1, x2_shape[1], x2_shape[2], -1]
+        x1_crop = tf.slice(x1, offsets, size)
+        return x1_crop
+############################################
 def crop_to_wanted_shape(x, shape):
     """ function to crop input image to wanted shape:
     _______________________________________________________
@@ -640,20 +547,138 @@ def crop_numpy_image(x,shape, num_ch = 3):
     else:
         im = x[:,start:end_p, start:end_p]
     return im
+############################## Functions to generate images###################################################### 
+def add_colorbar(im, aspect=20, pad_fraction=0.5, **kwargs):
+    """Add a vertical color bar to an image plot."""
+    divider = axes_grid1.make_axes_locatable(im.axes)
+    width = axes_grid1.axes_size.AxesY(im.axes, aspect=1./aspect)
+    pad = axes_grid1.axes_size.Fraction(pad_fraction, width)
+    current_ax = plt.gca()
+    cax = divider.append_axes("right", size=width, pad=pad)
+    plt.sca(current_ax)
+    return im.axes.figure.colorbar(im, cax=cax, **kwargs)
+######################### Function to save images and uncertainty information #############################################
+
+def save_adversarial_uncertainty(path,truex,adv, logits, truey,sigma,masked, images_n, Adversarial = True, targeted=True):
+    """
+    function to generate images 
+    """
+    path_full= path + './test_images/'
+    if not os.path.exists(path_full):
+        os.makedirs(path_full)
+
+    N = 403 # number of test images to consider
+    predict2 = np.argmax(logits, axis = -1)
+    uncert= np.take_along_axis(sigma, np.expand_dims(predict2, axis=-1), axis=-1).squeeze(axis=-1)
     
-# main function is used to train and build the adversarial attacks
+    mean_u = np.mean(uncert)
+    np.random.seed(3) 
+    ind=np.random.choice(np.arange(N), images_n)
+   
+    n = 0
+    
+    cMap = []
+    for value, colour in zip([0, 1, 2],["Black", "Yellow", "Red"]): cMap.append((value/2., colour))
+    customColourMap = LinearSegmentedColormap.from_list("custom", cMap)
+    for i in ind:
+        u = uncert[i,:,:]
+        if Adversarial:
+         M = masked[i,:,:]
+        P = predict2[i,:,:]
+        L = truey[i,:,:]
+        if Adversarial:
+            plt.figure()
+            plt.imshow(np.squeeze(truex[i,:,:]), 'gray', interpolation='none')
+            plt.imshow(np.squeeze(adv[i,:,:]),'gray', interpolation='none', alpha= 0.8)
+            ax = plt.gca()
+            ax.axes.xaxis.set_visible(False)
+            ax.axes.yaxis.set_visible(False)
+            plt.savefig(path_full + '{}_Adversarial_noise.png'.format(i))
+            plt.close()
+        
+        plt.figure(figsize=(10,10))
+        plt.imshow(L, customColourMap, interpolation='none')
+        plt.title("Ground truth Label") 
+        ax = plt.gca()
+        ax.axes.xaxis.set_visible(False)
+        ax.axes.yaxis.set_visible(False)
+        plt.savefig(path_full + '{}_Label_image.png'.format(i))
+        plt.close()
+
+
+        plt.figure(figsize=(10,10))
+        plt.imshow(P, customColourMap, interpolation='none')
+        plt.title("Predicted Label") 
+        ax = plt.gca()
+        ax.axes.xaxis.set_visible(False)
+        ax.axes.yaxis.set_visible(False)
+        plt.savefig(path_full + '{}_Predicted_image.png'.format(i))
+        plt.close()
+
+        plt.figure(figsize=(10,10))
+        im= plt.imshow(u, cmap='winter_r', interpolation='nearest')
+        plt.title("Uncertainty map") 
+        add_colorbar(im)
+        #plt.clim(m_un,mx_un)
+        ax = plt.gca()
+        ax.axes.xaxis.set_visible(False)
+        ax.axes.yaxis.set_visible(False)
+        plt.savefig(path_full +'{}_uncertainty_heatmap.png'.format(i))
+        plt.close()
+
+        if Adversarial:
+         if targeted:
+            plt.figure(figsize=(10,10))
+            plt.imshow(M, customColourMap, interpolation='none')
+            plt.title("Masked Label") 
+            ax = plt.gca()
+            ax.axes.xaxis.set_visible(False)
+            ax.axes.yaxis.set_visible(False)
+            plt.savefig(path_full + '{}_Masked_Label_image.png'.format(i))
+            plt.close()
+
+    
+    # creating uncertainty file to record the predictive variance for 2 binary tasks:
+    ##task 1: Everything vs Anterior
+    mask1ant  = np.ma.masked_where(predict2 != 1, uncert) # masking all non-anterior
+    anterior_unc = np.mean(mask1ant)
+    mask2ant  = np.ma.masked_where(predict2 == 1, uncert) # masking  anterior 
+    no_ant_unc = np.mean(mask2ant)
+    ##task 2: Everything vs Posterior
+    mask1po  = np.ma.masked_where(predict2 != 2, uncert) # masking all non-posterior
+    posterior_unc = np.mean(mask1po)
+    mask2po  = np.ma.masked_where(predict2 == 2, uncert) # masking posterior
+    no_po_unc = np.mean(mask2po)
+
+
+
+    textfile = open(path + 'Predictive_variance_tasks.txt','w')
+    textfile.write('\n Average Predictive variance : ' +str(mean_u)) 
+    textfile.write("\n---------------------------------")
+    textfile.write('\n Predictive variance for all  anterior structures : ' +str(anterior_unc))         
+    textfile.write('\n Predictive variance for non-anterior structures : ' +str(no_ant_unc)) 
+    textfile.write("\n---------------------------------")
+    textfile.write('\n Predictive variance for posterior portion : ' +str(posterior_unc))         
+    textfile.write('\n Predictive variance for non-posterior structures : ' +str(no_po_unc)) 
+    textfile.close()
+    print('done saving uncertainty and creating images')
+    return mean_u,  anterior_unc, posterior_unc   
+#################################################################################################################
+
+#################################################################################################################
+# MAIN FUNCTION USED TO TRAIN AND BUILD ADVERSARIAL ATTACKS
 def main_function(n_kernels=32, output_channels = 3, batch_size=10, epochs = 100, lr=0.0001, kl_factor = 0.001,
          Training = True, continue_training =True, saved_model_epochs=50, Adversarial_noise=False,  
         epsilon = 0.0001, Targeted=True, maxAdvStep=20, stepSize =1, adversary_targeted_class = 2 
         , adv_class = 3):  
 
     
-    PATH = '/data/giuse/Segmentation_data/Hippocampus/saved_models_VMP/epoch_{}/'.format(epochs) 
+    PATH = './Segmentation_data/Hippocampus/saved_models_VMP/epoch_{}/'.format(epochs) 
     if not os.path.exists( PATH):
         os.makedirs(PATH)  	    
     output_size = output_channels 
     #data saved pre-processed in pickle file named train_test_augmented2.pkl
-    t2 = open('/data/giuse/Segmentation_data/Task04_Hippocampus/Task04_Hippocampus/train_test_augmented2.pkl', 'rb')
+    t2 = open('./Segmentation_data/Task04_Hippocampus/Task04_Hippocampus/train_test_augmented2.pkl', 'rb')
     x_train,y_train,x_original_test,y_original_test = pickle.load(t2)                                                               
     t2.close()
     n_test = x_original_test.shape[0]-1
@@ -718,7 +743,7 @@ def main_function(n_kernels=32, output_channels = 3, batch_size=10, epochs = 100
           return signed_grad, loss
     if Training:
         if continue_training: 
-            saved_model_path = '/data/giuse/Segmentation_data/Hippocampus/saved_models_VMP/epoch_{}/'.format(saved_model_epochs)
+            saved_model_path = './Segmentation_data/Hippocampus/saved_models_VMP/epoch_{}/'.format(saved_model_epochs)
             UNET_model.load_weights(saved_model_path + 'vmp_UNET_model')
         train_acc = np.zeros(epochs) 
         valid_acc = np.zeros(epochs)
@@ -974,7 +999,6 @@ def main_function(n_kernels=32, output_channels = 3, batch_size=10, epochs = 100
 
             adv_x = x
             
-            #this part commented is for vgd attack
              
             if Targeted:
              for advStep in range(maxAdvStep): 
@@ -1114,31 +1138,15 @@ def main_function(n_kernels=32, output_channels = 3, batch_size=10, epochs = 100
             textfile.write("\n SNR: "+ str(batch_SNR/n_test_steps))               
         textfile.write("\n---------------------------------")    
         textfile.close()
-        
+#####################################################################################################################
 
-if __name__ == '__main__':
-    main_function()
-    
-    main_function(Training= False, Adversarial_noise = True, epsilon = 0.001, maxAdvStep=20, adversary_targeted_class=1, adv_class = 2)
-    main_function(Training= False, Adversarial_noise = True, epsilon = 0.01, maxAdvStep=20, adversary_targeted_class=1, adv_class = 2)
-    main_function(Training= False, Adversarial_noise = True, epsilon = 0.001, maxAdvStep=20, adversary_targeted_class=2, adv_class = 1)
-    main_function(Training= False, Adversarial_noise = True, epsilon = 0.01, maxAdvStep=20, adversary_targeted_class=2, adv_class = 1)    
-    main_function(Training= False, Adversarial_noise = True, epsilon = 0.1, maxAdvStep=20, adversary_targeted_class=2, adv_class = 1)    
-    main_function(Training= False, Adversarial_noise = True, epsilon = 0.1, maxAdvStep=20, adversary_targeted_class=1, adv_class = 2)
-    
-    main_function(Training= False, Adversarial_noise = True, epsilon = 0.02, maxAdvStep=20, adversary_targeted_class=1, adv_class = 2)
-    main_function(Training= False, Adversarial_noise = True, epsilon = 0.02, maxAdvStep=20, adversary_targeted_class=2, adv_class = 1)
-    main_function(Training= False, Adversarial_noise = True, epsilon = 0.05, maxAdvStep=20, adversary_targeted_class=1, adv_class = 2)
-    main_function(Training= False, Adversarial_noise = True, epsilon = 0.05, maxAdvStep=20, adversary_targeted_class=2, adv_class = 1)
-    
-print('##############################################')
 #functions to test on noise free data and gaussian noise 
 def testing(epochs, labels, gaussain_noise_std, slices = 1, n_kernels = 32,Random_noise =False, noise_on = 'B'):
     """ function to test model with or without noise added."""
     print('starting testing')
     output_size = 3
     batch_size =10 
-    t2 = open('/data/giuse/Segmentation_data/Task04_Hippocampus/Task04_Hippocampus/train_test_augmented2.pkl', 'rb')
+    t2 = open('./Segmentation_data/Task04_Hippocampus/Task04_Hippocampus/train_test_augmented2.pkl', 'rb')
     
     x_train,y_train,x_original_test,y_original_test = pickle.load(t2)                                                               
     t2.close()
@@ -1158,7 +1166,7 @@ def testing(epochs, labels, gaussain_noise_std, slices = 1, n_kernels = 32,Rando
     )
     UNET_model = Density_prop_with_pad_UNET(n_kernels, output_size, name = 'vmp_unet')
     
-    PATH = '/data/giuse/Segmentation_data/Hippocampus/saved_models_VMP/epoch_{}/'.format(epochs) 
+    PATH = './Segmentation_data/Hippocampus/saved_models_VMP/epoch_{}/'.format(epochs) 
     
      
     if Random_noise:
@@ -1298,7 +1306,7 @@ def testing(epochs, labels, gaussain_noise_std, slices = 1, n_kernels = 32,Rando
     variance = np.mean(variance)
 
     print('Test Dice Coefficients : ', test_d1, test_d2) 
-    data_folder =  '/data/giuse/Segmentation_data/Hippocampus/saved_models_VMP/epoch_{}/'.format(epochs) 
+    data_folder =  './Segmentation_data/Hippocampus/saved_models_VMP/epoch_{}/'.format(epochs) 
     if Random_noise:
             print('Test average snr signal : ',new_t_snr)
             if noise_on == 'A':
@@ -1389,23 +1397,33 @@ def save_uncertainty(path,images_n, noise, where_noise ):
     file1.close()  
     mean_u,  class1_unc, class2_unc= save_adversarial_uncertainty(path, truex, 0, logits, truey, sigma, 0,images_n,Adversarial=False )
     return mean_u,   class1_unc, class2_unc
-
+#######################################################################################################################################
+# (1) train, (2) build and test with adversarial attacks, (3) select noise levels and test
+if __name__ == '__main__':
+    main_function()
+    
+    main_function(Training= False, Adversarial_noise = True, epsilon = 0.001, maxAdvStep=20, adversary_targeted_class=1, adv_class = 2)
+    main_function(Training= False, Adversarial_noise = True, epsilon = 0.01, maxAdvStep=20, adversary_targeted_class=1, adv_class = 2)
+    main_function(Training= False, Adversarial_noise = True, epsilon = 0.001, maxAdvStep=20, adversary_targeted_class=2, adv_class = 1)
+    main_function(Training= False, Adversarial_noise = True, epsilon = 0.01, maxAdvStep=20, adversary_targeted_class=2, adv_class = 1)    
+    main_function(Training= False, Adversarial_noise = True, epsilon = 0.1, maxAdvStep=20, adversary_targeted_class=2, adv_class = 1)    
+    main_function(Training= False, Adversarial_noise = True, epsilon = 0.1, maxAdvStep=20, adversary_targeted_class=1, adv_class = 2)
+    
+    main_function(Training= False, Adversarial_noise = True, epsilon = 0.02, maxAdvStep=20, adversary_targeted_class=1, adv_class = 2)
+    main_function(Training= False, Adversarial_noise = True, epsilon = 0.02, maxAdvStep=20, adversary_targeted_class=2, adv_class = 1)
+    main_function(Training= False, Adversarial_noise = True, epsilon = 0.05, maxAdvStep=20, adversary_targeted_class=1, adv_class = 2)
+    main_function(Training= False, Adversarial_noise = True, epsilon = 0.05, maxAdvStep=20, adversary_targeted_class=2, adv_class = 1)
 # noise values we want to test    
 noise =  [ 0.005, 0.01, 0.02, 0.05, 0.1]
 
 l = len(noise)
-epochs = 100
+epochs = 100   # select the number of epochs of the saved models
 labels = 3
 
 
-anterior ={} 
-all_image={}
-posterior = {}
 
 d1_no_noise,d2_no_noise,t_snr_no_noise,t_si_no_noise, path_no_noise =testing(epochs, labels, 0, Random_noise =False, noise_on = 'B')
 mean_u_no_noise,class1_unc, class2_unc= save_uncertainty(path_no_noise,images_n=10, noise=0, where_noise='A')
-
-no_noise= np.array([mean_u_no_noise,class1_unc, class2_unc,  d1_no_noise,d2_no_noise,t_snr_no_noise,t_si_no_noise])
 print('done with no noise')
 for i in noise:
     print('working with noise', i)
